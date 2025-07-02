@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 
 from config import MainConfig
+import config
+import importlib
 
 def test_osrm_limits():
     """Показва актуалните OSRM лимити и настройки"""
@@ -31,4 +33,30 @@ def test_osrm_limits():
     print("   • Route API: 1 заявка = 1 маршрут (МНОГО БАВНО за >15 локации)")
 
 if __name__ == "__main__":
-    test_osrm_limits() 
+    test_osrm_limits()
+
+# Принудително рестартираме config
+importlib.reload(config)
+
+cfg = config.get_config()
+
+print('=== ЛОКАЦИИ ===')
+print(f'Основно депо: {cfg.locations.depot_location}')
+print(f'Център локация: {cfg.locations.center_location}')
+
+print('\n=== ПРЕВОЗНИ СРЕДСТВА ===')
+for i, vehicle in enumerate(cfg.vehicles):
+    print(f'{i+1}. {vehicle.vehicle_type.value}:')
+    print(f'   capacity: {vehicle.capacity}')
+    print(f'   count: {vehicle.count}')
+    print(f'   start_location: {vehicle.start_location}')
+    if vehicle.vehicle_type.value == 'center_bus':
+        print(f'   📍 CENTER_BUS трябва да стартира от: {cfg.locations.center_location}')
+        print(f'   ✅ Правилно настроен: {vehicle.start_location == cfg.locations.center_location}')
+    print()
+
+# Тест на enabled vehicles
+enabled_vehicles = config.config_manager.get_enabled_vehicles()
+print('=== ВКЛЮЧЕНИ ПРЕВОЗНИ СРЕДСТВА ===')
+for vehicle in enabled_vehicles:
+    print(f'{vehicle.vehicle_type.value}: start_location = {vehicle.start_location}') 

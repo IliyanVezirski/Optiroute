@@ -34,7 +34,7 @@ class VehicleConfig:
 class LocationConfig:
     """GPS координати за важни локации"""
     depot_location: Tuple[float, float] = (42.695785029219415, 23.23165887245312)  # Стартова точка
-    center_location: Tuple[float, float] = (42.69769851709216, 23.32175896081278)  # Точка център
+    center_location: Tuple[float, float] = (42.69773576871825, 23.321588606946342)  # Точка център
 
 
 @dataclass
@@ -65,7 +65,7 @@ class InputConfig:
     excel_file_path: str = "data/input.xlsx"
     gps_column: str = "GpsData"
     client_id_column: str = "Клиент"
-    client_name_column: str = "Име Клиент"
+    client_name_column: str = "Име клиент"
     volume_column: str = "Обем"
     sheet_name: Optional[str] = None  # ако е None, взема първия лист
     encoding: str = "utf-8"
@@ -86,9 +86,9 @@ class CVRPConfig:
     algorithm: str = "or_tools"  # or_tools, genetic, simulated_annealing, ant_colony
     
     # OR-Tools настройки - оптимизирани за стабилност
-    time_limit_seconds: int = 20
-    first_solution_strategy: str = "AUTOMATIC"  
-    local_search_metaheuristic: str = "AUTOMATIC"  
+    time_limit_seconds: int = 150
+    first_solution_strategy: str = "PATH_CHEAPEST_ARC"  
+    local_search_metaheuristic: str = "LOCAL_SEARCH"  
     log_search: bool = True  # изключено за по-бързо изпълнение
     
     # Общи настройки
@@ -202,7 +202,7 @@ class MainConfig:
                 count=4,
                 max_distance_km=50,
                 max_time_hours=8,
-                service_time_minutes=15,
+                service_time_minutes=10,
                 enabled=True
             ),
             # 2. Център бус - 1 бр, 250 ст, стартира от център
@@ -212,18 +212,18 @@ class MainConfig:
                 count=1,
                 max_distance_km=40,
                 max_time_hours=8,
-                service_time_minutes=15,
+                service_time_minutes=10,
                 enabled=True,
                 start_location=self.locations.center_location
             ),
-            # 3. Външни бусове - 3 бр, 360 ст
+            # 3. Външни бусове - 3 бр, 360 ст, 150км ограничение
             VehicleConfig(
                 vehicle_type=VehicleType.EXTERNAL_BUS,
                 capacity=360,
                 count=3,
-                max_distance_km=150,
+                max_distance_km=200,
                 max_time_hours=8,
-                service_time_minutes=15,
+                service_time_minutes=10,
                 enabled=True
             )
         ]

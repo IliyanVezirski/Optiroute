@@ -12,6 +12,7 @@
 - [Архитектура](#архитектура)
 - [Performance и мащабиране](#performance-и-мащабиране)
 - [Troubleshooting](#troubleshooting)
+- [Interactive Map Generation](#interactive-map-generation)
 
 ## 🚀 Технологии и алгоритми
 
@@ -650,6 +651,115 @@ def get_osrm_route_geometry(self, waypoints):
         logger.error(f"OSRM geometry error: {e}")
         return waypoints
 ```
+
+## 🗺️ Interactive Map Generation
+
+### OSRM Route API Integration
+
+**Real-time route geometry from OSRM:**
+```python
+def _get_osrm_route_geometry(self, start_coords, end_coords):
+    """Получава реална геометрия на маршрута от OSRM Route API"""
+    try:
+        import requests
+        from config import get_config
+        
+        # OSRM Route API заявка за пълна геометрия
+        osrm_config = get_config().osrm
+        base_url = osrm_config.base_url.rstrip('/')
+        
+        # Форматираме координатите за OSRM (lon,lat формат)
+        start_lon, start_lat = start_coords[1], start_coords[0]
+        end_lon, end_lat = end_coords[1], end_coords[0]
+        
+        route_url = f"{base_url}/route/v1/driving/{start_lon:.6f},{start_lat:.6f};{end_lon:.6f},{end_lat:.6f}?geometries=geojson&overview=full&steps=false"
+        
+        response = requests.get(route_url, timeout=10)
+        response.raise_for_status()
+        
+        data = response.json()
+        
+        if data['code'] == 'Ok' and data['routes']:
+            route = data['routes'][0]
+            coordinates = route['geometry']['coordinates']
+            
+            # Конвертираме от [lon,lat] към [lat,lon] за Folium
+            geometry = [(coord[1], coord[0]) for coord in coordinates]
+            
+            logger.debug(f"✅ OSRM геометрия получена: {len(geometry)} точки")
+            return geometry
+        else:
+            logger.warning(f"OSRM Route API грешка: {data.get('message', 'Неизвестна грешка')}")
+            return [start_coords, end_coords]
+            
+    except Exception as e:
+        logger.warning(f"Грешка при OSRM Route API заявка: {e}")
+        # Fallback към права линия
+        return [start_coords, end_coords]
+```
+
+**Full route geometry with multiple waypoints:**
+```python
+def _get_full_route_geometry(self, waypoints):
+    """Получава пълната геометрия за маршрут с множество точки от OSRM"""
+    if len(waypoints) < 2:
+        return waypoints
+    
+    try:
+        import requests
+        from config import get_config
+        
+        # OSRM Route API заявка за целия маршрут
+        osrm_config = get_config().osrm
+        base_url = osrm_config.base_url.rstrip('/')
+        
+        # Форматираме всички координати за OSRM (lon,lat формат)
+        coords_str = ';'.join([f"{lon:.6f},{lat:.6f}" for lat, lon in waypoints])
+        
+        route_url = f"{base_url}/route/v1/driving/{coords_str}?geometries=geojson&overview=full&steps=false"
+        
+        response = requests.get(route_url, timeout=15)
+        response.raise_for_status()
+        
+        data = response.json()
+        
+        if data['code'] == 'Ok' and data['routes']:
+            route = data['routes'][0]
+            coordinates = route['geometry']['coordinates']
+            
+            # Конвертираме от [lon,lat] към [lat,lon] за Folium
+            geometry = [(coord[1], coord[0]) for coord in coordinates]
+            
+            logger.info(f"✅ OSRM маршрут геометрия получена: {len(geometry)} точки за {len(waypoints)} waypoints")
+            return geometry
+        else:
+            logger.warning(f"OSRM Route API грешка за пълен маршрут: {data.get('message', 'Неизвестна грешка')}")
+            return waypoints
+            
+    except Exception as e:
+        logger.warning(f"Грешка при OSRM Route API заявка за пълен маршрут: {e}")
+        # Fallback към последователност от прави линии
+        return waypoints
+```
+
+**Enhanced map features:**
+- ✅ **Real OSRM route geometry** - показва реалните пътища по улиците
+- ✅ **Distance information** - разстоянията са изчислени от OSRM данните
+- ✅ **Route statistics** - общо разстояние, време, обем
+- ✅ **Fallback mechanism** - прави линии ако OSRM не е достъпен
+- ✅ **Interactive popups** - детайлна информация за всеки маршрут
+- ✅ **Color-coded routes** - всеки автобус има уникален цвят
+- ✅ **Numbered customers** - показва реда на посещение
+
+**Testing OSRM routes:**
+```bash
+# Test OSRM Route API functions
+python test_osrm_routes.py
+```
+
+### Map Features
+
+**Depot marker с custom icon:**
 
 ## 🔧 Troubleshooting
 

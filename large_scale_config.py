@@ -94,11 +94,11 @@ def adaptive_config_by_client_count(num_clients):
         metaheuristic = "GUIDED_LOCAL_SEARCH"
     elif num_clients <= 150:
         timeout = 900        # 15 минути
-        strategy = "PARALLEL_CHEAPEST_INSERTION"
+        strategy = "PATH_CHEAPEST_ARC"
         metaheuristic = "GUIDED_LOCAL_SEARCH"
     elif num_clients <= 200:
         timeout = 1200       # 20 минути
-        strategy = "PARALLEL_CHEAPEST_INSERTION"
+        strategy = "PATH_CHEAPEST_ARC"
         metaheuristic = "GUIDED_LOCAL_SEARCH"
     elif num_clients <= 250:
         timeout = 1500       # 25 минути

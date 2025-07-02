@@ -85,31 +85,30 @@ class CVRPApplication:
             # Стъпка 3: CVRP оптимизация
             self.logger.info("Стъпка 3: CVRP оптимизация на маршрутите")
             
-            if warehouse_allocation.vehicle_customers:
-                cvrp_solution = self.cvrp_solver.solve(warehouse_allocation, input_data.depot_location)
-                
-                self.logger.info(f"CVRP решение: {cvrp_solution.total_vehicles_used} превозни средства")
-                self.logger.info(f"Общо разстояние: {cvrp_solution.total_distance_km:.2f} км")
-                self.logger.info(f"Общо време: {cvrp_solution.total_time_minutes:.1f} минути")
-            else:
-                self.logger.warning("Няма клиенти за превозни средства - създавам празно решение")
-                from cvrp_solver import CVRPSolution
-                cvrp_solution = CVRPSolution([], 0, 0, 0, 0, True)
+            solution = self.cvrp_solver.solve(warehouse_allocation, input_data.depot_location)
+            
+            self.logger.info(f"CVRP решение: {solution.total_vehicles_used} превозни средства")
+            self.logger.info(f"Общо разстояние: {solution.total_distance_km:.2f} км")
+            self.logger.info(f"Общо време: {solution.total_time_minutes:.1f} минути")
             
             # Стъпка 4: Генериране на изходи
             self.logger.info("Стъпка 4: Генериране на изходни файлове")
             output_files = self.output_handler.generate_all_outputs(
-                cvrp_solution, warehouse_allocation, input_data.depot_location
+                solution, warehouse_allocation, input_data.depot_location
             )
             
             # Резюме
-            self._print_summary(input_data, warehouse_allocation, cvrp_solution, output_files)
+            self._print_summary(input_data, warehouse_allocation, solution, output_files)
             
             execution_time = time.time() - start_time
             self.logger.info(f"Общо време за изпълнение: {execution_time:.2f} секунди")
             self.logger.info("="*60)
             self.logger.info("CVRP ОПТИМИЗАЦИЯ ЗАВЪРШЕНА УСПЕШНО")
             self.logger.info("="*60)
+            
+            cnt_center = sum(1 for c in input_data.customers if "Център" in c.name)
+            cnt_ext    = sum(1 for c in input_data.customers if "Външен" in c.name)
+            self.logger.info(f"Клиенти Център={cnt_center}, Външен={cnt_ext}")
             
             return True
             
@@ -124,7 +123,7 @@ class CVRPApplication:
             # Затваряне на ресурсите
             self.cvrp_solver.close()
     
-    def _print_summary(self, input_data, warehouse_allocation, cvrp_solution, output_files):
+    def _print_summary(self, input_data, warehouse_allocation, final_params, output_files):
         """Отпечатва резюме на изпълнението"""
         self.logger.info("\n" + "="*50)
         self.logger.info("РЕЗЮМЕ НА ОПТИМИЗАЦИЯТА")
@@ -146,16 +145,16 @@ class CVRPApplication:
         
         # CVRP решение
         self.logger.info("\nCVRP РЕШЕНИЕ:")
-        self.logger.info(f"  Използвани превозни средства: {cvrp_solution.total_vehicles_used}")
-        self.logger.info(f"  Общо разстояние: {cvrp_solution.total_distance_km:.2f} км")
-        self.logger.info(f"  Общо време: {cvrp_solution.total_time_minutes:.1f} минути")
-        self.logger.info(f"  Fitness оценка: {cvrp_solution.fitness_score:.2f}")
-        self.logger.info(f"  Допустимо решение: {'Да' if cvrp_solution.is_feasible else 'Не'}")
+        self.logger.info(f"  Използвани превозни средства: {final_params.total_vehicles_used}")
+        self.logger.info(f"  Общо разстояние: {final_params.total_distance_km:.2f} км")
+        self.logger.info(f"  Общо време: {final_params.total_time_minutes:.1f} минути")
+        self.logger.info(f"  Fitness оценка: {final_params.fitness_score:.2f}")
+        self.logger.info(f"  Допустимо решение: {'Да' if final_params.is_feasible else 'Не'}")
         
         # Детайли по маршрути
-        if cvrp_solution.routes:
+        if final_params.routes:
             self.logger.info("\nДЕТАЙЛИ ПО МАРШРУТИ:")
-            for i, route in enumerate(cvrp_solution.routes):
+            for i, route in enumerate(final_params.routes):
                 vehicle_name = route.vehicle_type.value.replace('_', ' ').title()
                 self.logger.info(f"  Маршрут {i+1} ({vehicle_name}):")
                 self.logger.info(f"    Клиенти: {len(route.customers)}")

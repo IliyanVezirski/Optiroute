@@ -33,7 +33,7 @@ VEHICLE_SETTINGS = {
         'name': 'Централен автобус'
     },
     'external_bus': {
-        'color': 'green',
+        'color': 'red',
         'icon': 'truck',
         'prefix': 'fa', 
         'name': 'Външен автобус'
@@ -73,13 +73,35 @@ class InteractiveMapGenerator:
         # Зареждаме централната матрица
         self.central_matrix = get_distance_matrix_from_central_cache([])
         self.use_osrm_routing = self.central_matrix is not None
-        if not self.central_matrix:
-            logger.warning("❌ Не можах да заредя централната матрица. Ще използвам прави линии.")
+        
+        # Проверяваме дали OSRM е достъпен
+        try:
+            import requests
+            from config import get_config
+            osrm_config = get_config().osrm
+            test_url = f"{osrm_config.base_url.rstrip('/')}/route/v1/driving/23.3,42.7;23.3,42.7"
+            response = requests.get(test_url, timeout=5)
+            if response.status_code == 200:
+                logger.info("✅ OSRM сървър е достъпен - ще използвам реални маршрути")
+                self.use_osrm_routing = True
+            else:
+                logger.warning("⚠️ OSRM сървър не отговаря - ще използвам прави линии")
+                self.use_osrm_routing = False
+        except Exception as e:
+            logger.warning(f"⚠️ Не мога да се свържа с OSRM сървъра: {e}")
+            logger.warning("   Ще използвам прави линии за маршрутите")
+            self.use_osrm_routing = False
     
     def create_map(self, solution: CVRPSolution, warehouse_allocation: WarehouseAllocation,
                   depot_location: Tuple[float, float]) -> folium.Map:
         """Създава интерактивна карта с маршрутите"""
         logger.info("Създавам интерактивна карта")
+        
+        # Показваме OSRM статуса
+        if self.use_osrm_routing:
+            logger.info("🛣️ Използвам OSRM Route API за реални маршрути")
+        else:
+            logger.warning("📐 Използвам прави линии (OSRM недостъпен)")
         
         # Инициализация на картата
         route_map = folium.Map(
@@ -111,41 +133,83 @@ class InteractiveMapGenerator:
     
     def _get_osrm_route_geometry(self, start_coords: Tuple[float, float], 
                                 end_coords: Tuple[float, float]) -> List[Tuple[float, float]]:
-        """Получава реална геометрия на маршрута от централната матрица"""
-        # Ако нямаме централна матрица, връщаме права линия
-        if not self.central_matrix:
-            return [start_coords, end_coords]
-            
+        """Получава реална геометрия на маршрута от OSRM Route API"""
         try:
-            # Търсим индексите на точките в централната матрица
-            start_idx = -1
-            end_idx = -1
-            for idx, loc in enumerate(self.central_matrix.locations):
-                if abs(loc[0] - start_coords[0]) < 0.0001 and abs(loc[1] - start_coords[1]) < 0.0001:
-                    start_idx = idx
-                if abs(loc[0] - end_coords[0]) < 0.0001 and abs(loc[1] - end_coords[1]) < 0.0001:
-                    end_idx = idx
-                if start_idx >= 0 and end_idx >= 0:
-                    break
+            import requests
+            from config import get_config
             
-            # Ако не намерим точките, връщаме права линия
-            if start_idx == -1 or end_idx == -1:
-                logger.debug(f"Точките не са намерени в централната матрица: {start_coords} -> {end_coords}")
+            # OSRM Route API заявка за пълна геометрия
+            osrm_config = get_config().osrm
+            base_url = osrm_config.base_url.rstrip('/')
+            
+            # Форматираме координатите за OSRM (lon,lat формат)
+            start_lon, start_lat = start_coords[1], start_coords[0]
+            end_lon, end_lat = end_coords[1], end_coords[0]
+            
+            route_url = f"{base_url}/route/v1/driving/{start_lon:.6f},{start_lat:.6f};{end_lon:.6f},{end_lat:.6f}?geometries=geojson&overview=full&steps=false"
+            
+            response = requests.get(route_url, timeout=10)
+            response.raise_for_status()
+            
+            data = response.json()
+            
+            if data['code'] == 'Ok' and data['routes']:
+                route = data['routes'][0]
+                coordinates = route['geometry']['coordinates']
+                
+                # Конвертираме от [lon,lat] към [lat,lon] за Folium
+                geometry = [(coord[1], coord[0]) for coord in coordinates]
+                
+                logger.debug(f"✅ OSRM геометрия получена: {len(geometry)} точки")
+                return geometry
+            else:
+                logger.warning(f"OSRM Route API грешка: {data.get('message', 'Неизвестна грешка')}")
                 return [start_coords, end_coords]
             
-            # Връщаме точките от матрицата
-            return [start_coords, end_coords]
-            
         except Exception as e:
-            logger.warning(f"Грешка при използване на централната матрица: {e}")
+            logger.warning(f"Грешка при OSRM Route API заявка: {e}")
+            # Fallback към права линия
             return [start_coords, end_coords]
     
     def _get_full_route_geometry(self, waypoints: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
-        """Получава пълната геометрия за маршрут с множество точки"""
+        """Получава пълната геометрия за маршрут с множество точки от OSRM"""
         if len(waypoints) < 2:
             return waypoints
         
-        # Връщаме последователност от точки
+        try:
+            import requests
+            from config import get_config
+            
+            # OSRM Route API заявка за целия маршрут
+            osrm_config = get_config().osrm
+            base_url = osrm_config.base_url.rstrip('/')
+            
+            # Форматираме всички координати за OSRM (lon,lat формат)
+            coords_str = ';'.join([f"{lon:.6f},{lat:.6f}" for lat, lon in waypoints])
+            
+            route_url = f"{base_url}/route/v1/driving/{coords_str}?geometries=geojson&overview=full&steps=false"
+            
+            response = requests.get(route_url, timeout=15)
+            response.raise_for_status()
+            
+            data = response.json()
+            
+            if data['code'] == 'Ok' and data['routes']:
+                route = data['routes'][0]
+                coordinates = route['geometry']['coordinates']
+                
+                # Конвертираме от [lon,lat] към [lat,lon] за Folium
+                geometry = [(coord[1], coord[0]) for coord in coordinates]
+                
+                logger.info(f"✅ OSRM маршрут геометрия получена: {len(geometry)} точки за {len(waypoints)} waypoints")
+                return geometry
+            else:
+                logger.warning(f"OSRM Route API грешка за пълен маршрут: {data.get('message', 'Неизвестна грешка')}")
+                return waypoints
+                
+        except Exception as e:
+            logger.warning(f"Грешка при OSRM Route API заявка за пълен маршрут: {e}")
+            # Fallback към последователност от прави линии
         full_geometry = []
         for i in range(len(waypoints) - 1):
             segment = self._get_osrm_route_geometry(waypoints[i], waypoints[i + 1])
@@ -157,7 +221,10 @@ class InteractiveMapGenerator:
         return full_geometry if full_geometry else waypoints
     
     def _add_routes_to_map(self, route_map: folium.Map, routes: List[Route], depot_location: Tuple[float, float]):
-        """Добавя маршрутите на картата с OSRM геометрия"""
+        """Добавя маршрутите на картата с OSRM геометрия и филтър за бусовете"""
+        # Създаваме FeatureGroup за всеки автобус
+        bus_layers = {}
+        
         for route_idx, route in enumerate(routes):
             vehicle_settings = VEHICLE_SETTINGS.get(route.vehicle_type.value, {
                 'color': 'gray', 
@@ -168,6 +235,11 @@ class InteractiveMapGenerator:
             
             # Всеки автобус получава уникален цвят
             bus_color = BUS_COLORS[route_idx % len(BUS_COLORS)]
+            bus_id = f"bus_{route_idx + 1}"
+            
+            # Създаваме FeatureGroup за този автобус
+            bus_layer = folium.FeatureGroup(name=f"🚌 Автобус {route_idx + 1} ({len(route.customers)} клиента)")
+            bus_layers[bus_id] = bus_layer
             
             # Добавяне на клиентските маркери с номерация
             for client_idx, customer in enumerate(route.customers):
@@ -207,8 +279,8 @@ class InteractiveMapGenerator:
                     </div>
                     """
                     
-                    # Добавяме номерирания маркер
-                    folium.Marker(
+                    # Добавяме номерирания маркер в слоя на автобуса
+                    marker = folium.Marker(
                         customer.coordinates,
                         popup=folium.Popup(popup_text, max_width=300),
                         tooltip=f"#{client_number}: {customer.name}",
@@ -218,7 +290,8 @@ class InteractiveMapGenerator:
                             icon_anchor=(15, 15),
                             popup_anchor=(0, -15)
                         )
-                    ).add_to(route_map)
+                    )
+                    marker.add_to(bus_layer)
             
             # Създаваме пълния маршрут: депо -> клиенти -> депо
             if route.customers and self.use_osrm_routing:
@@ -236,24 +309,57 @@ class InteractiveMapGenerator:
                     route_geometry = self._get_full_route_geometry(waypoints)
                     
                     if len(route_geometry) > 2:
-                        folium.PolyLine(
+                        # Създаваме popup с информация за маршрута
+                        popup_text = f"""
+                        <div style="font-family: Arial, sans-serif;">
+                            <h4 style="margin: 0; color: {bus_color};">
+                                🚌 Автобус {route_idx + 1} - {vehicle_settings['name']}
+                            </h4>
+                            <hr style="margin: 5px 0;">
+                            <b>OSRM маршрут:</b> ✅<br>
+                            <b>Клиенти:</b> {len(route.customers)}<br>
+                            <b>Разстояние:</b> {route.total_distance_km:.1f} км<br>
+                            <b>Време:</b> {route.total_time_minutes:.0f} мин<br>
+                            <b>Обем:</b> {route.total_volume:.1f} ст.<br>
+                            <b>Геометрия:</b> {len(route_geometry)} точки
+                        </div>
+                        """
+                        
+                        # Създаваме линията в слоя на автобуса
+                        polyline = folium.PolyLine(
                             route_geometry,
                             color=bus_color,
                             weight=4,
                             opacity=0.8,
-                            popup=f"🚌 Автобус {route_idx + 1} - {vehicle_settings['name']} (OSRM маршрут)"
-                        ).add_to(route_map)
+                            popup=folium.Popup(popup_text, max_width=300)
+                        )
+                        polyline.add_to(bus_layer)
                         logger.info(f"✅ OSRM маршрут добавен за Автобус {route_idx + 1}: {len(route_geometry)} точки")
                     else:
                         # Fallback към прави линии
-                        folium.PolyLine(
+                        popup_text = f"""
+                        <div style="font-family: Arial, sans-serif;">
+                            <h4 style="margin: 0; color: {bus_color};">
+                                🚌 Автобус {route_idx + 1} - {vehicle_settings['name']}
+                            </h4>
+                            <hr style="margin: 5px 0;">
+                            <b>OSRM маршрут:</b> ⚠️ (прави линии)<br>
+                            <b>Клиенти:</b> {len(route.customers)}<br>
+                            <b>Разстояние:</b> {route.total_distance_km:.1f} км<br>
+                            <b>Време:</b> {route.total_time_minutes:.0f} мин<br>
+                            <b>Обем:</b> {route.total_volume:.1f} ст.
+                        </div>
+                        """
+                        
+                        polyline = folium.PolyLine(
                             waypoints,
                             color=bus_color,
                             weight=3,
                             opacity=0.6,
-                            popup=f"🚌 Автобус {route_idx + 1} - {vehicle_settings['name']} (Прави линии)",
+                            popup=folium.Popup(popup_text, max_width=300),
                             dashArray='5, 5'  # Пунктирана линия за показване че не е OSRM
-                        ).add_to(route_map)
+                        )
+                        polyline.add_to(bus_layer)
                         logger.warning(f"⚠️ Използвам прави линии за Автобус {route_idx + 1}")
                         
                 except Exception as e:
@@ -265,14 +371,29 @@ class InteractiveMapGenerator:
                             waypoints.append(customer.coordinates)
                     waypoints.append(depot_location)
                     
-                    folium.PolyLine(
+                    popup_text = f"""
+                    <div style="font-family: Arial, sans-serif;">
+                        <h4 style="margin: 0; color: {bus_color};">
+                            🚌 Автобус {route_idx + 1} - {vehicle_settings['name']}
+                        </h4>
+                        <hr style="margin: 5px 0;">
+                        <b>OSRM маршрут:</b> ❌ (fallback)<br>
+                        <b>Клиенти:</b> {len(route.customers)}<br>
+                        <b>Разстояние:</b> {route.total_distance_km:.1f} км<br>
+                        <b>Време:</b> {route.total_time_minutes:.0f} мин<br>
+                        <b>Обем:</b> {route.total_volume:.1f} ст.
+                    </div>
+                    """
+                    
+                    polyline = folium.PolyLine(
                         waypoints,
                         color=bus_color,
                         weight=3,
                         opacity=0.6,
-                        popup=f"🚌 Автобус {route_idx + 1} - {vehicle_settings['name']} (Fallback)",
+                        popup=folium.Popup(popup_text, max_width=300),
                         dashArray='5, 5'
-                    ).add_to(route_map)
+                    )
+                    polyline.add_to(bus_layer)
             
             elif route.customers:
                 # Fallback към прави линии ако OSRM е изключен
@@ -282,23 +403,42 @@ class InteractiveMapGenerator:
                         waypoints.append(customer.coordinates)
                 waypoints.append(depot_location)
                 
-                folium.PolyLine(
+                polyline = folium.PolyLine(
                     waypoints,
                     color=bus_color,
                     weight=3,
                     opacity=0.8,
                     popup=f"🚌 Автобус {route_idx + 1} - {vehicle_settings['name']}"
-                ).add_to(route_map)
+                )
+                polyline.add_to(bus_layer)
+        
+        # Добавяме всички слоеве на автобусите към картата
+        for bus_layer in bus_layers.values():
+            bus_layer.add_to(route_map)
+        
+        # Добавяме LayerControl за филтър
+        folium.LayerControl(
+            position='topright',
+            collapsed=False,
+            overlay=True,
+            control=True
+        ).add_to(route_map)
     
     def _add_legend(self, route_map: folium.Map, routes: List[Route]):
-        """Добавя легенда на картата"""
-        legend_html = '''
+        """Добавя легенда на картата с информация за маршрутите"""
+        # Изчисляваме статистики
+        total_distance = sum(route.total_distance_km for route in routes)
+        total_time = sum(route.total_time_minutes for route in routes)
+        total_volume = sum(route.total_volume for route in routes)
+        osrm_routes = sum(1 for route in routes if self.use_osrm_routing)
+        
+        legend_html = f'''
         <div style="position: fixed; 
-                    top: 10px; right: 10px; width: 220px; height: auto; 
+                    top: 10px; left: 10px; width: 280px; height: auto; 
                     background-color: white; border:2px solid grey; z-index:9999; 
                     font-size:14px; padding: 10px; border-radius: 5px;
                     box-shadow: 0 0 15px rgba(0,0,0,0.2);">
-        <h4 style="margin-top:0; margin-bottom:10px; text-align: center;">Легенда</h4>
+        <h4 style="margin-top:0; margin-bottom:10px; text-align: center;">🗺️ Информация</h4>
         '''
         
         # Добавяме депо
@@ -309,40 +449,37 @@ class InteractiveMapGenerator:
         </p>
         '''
         
-        # Добавяме всеки автобус поотделно с уникалният му цвят
-        for route_idx, route in enumerate(routes):
-            vehicle_settings = VEHICLE_SETTINGS.get(route.vehicle_type.value, {
-                'color': 'gray',
-                'icon': 'circle', 
-                'name': 'Неизвестен'
-            })
-            bus_color = BUS_COLORS[route_idx % len(BUS_COLORS)]
-            client_count = len(route.customers)
-            
-            legend_html += f'''
-            <p style="margin: 5px 0;">
-                <span style="
-                    display: inline-block;
-                    background-color: {bus_color};
-                    border: 2px solid white;
-                    border-radius: 50%;
-                    width: 20px;
-                    height: 20px;
-                    margin-right: 8px;
-                    vertical-align: middle;
-                "></span>
-                Автобус {route_idx + 1} ({client_count} клиента)
-            </p>
-            '''
+        # Добавяме информация за филтъра
+        legend_html += '''
+        <hr style="margin: 10px 0;">
+        <p style="margin: 5px 0; font-weight: bold;">🚌 Филтър на автобуси:</p>
+        <p style="margin: 5px 0; font-size: 12px; color: #666;">
+            Използвай контрола в горния десен ъгъл за показване/скриване на отделни автобуси
+        </p>
+        '''
         
         # Добавяме информация за OSRM маршрутите
-        osrm_info = "🛣️ OSRM маршрути" if self.use_osrm_routing else "📐 Прави линии"
+        osrm_status = "🛣️ OSRM маршрути" if self.use_osrm_routing else "📐 Прави линии"
         
         legend_html += f'''
         <hr style="margin: 10px 0;">
         <p style="margin: 5px 0; font-size: 12px; color: #666;">
             Числата показват реда на посещение<br>
-            {osrm_info}
+            {osrm_status}
+        </p>
+        '''
+        
+        # Добавяме статистики
+        legend_html += f'''
+        <hr style="margin: 10px 0;">
+        <p style="margin: 5px 0; font-size: 12px; font-weight: bold;">
+            📊 Статистики:
+        </p>
+        <p style="margin: 3px 0; font-size: 11px; color: #555;">
+            • Общо разстояние: {total_distance:.1f} км<br>
+            • Общо време: {total_time:.0f} мин<br>
+            • Общ обем: {total_volume:.1f} ст.<br>
+            • OSRM маршрути: {osrm_routes}/{len(routes)}
         </p>
         </div>
         '''

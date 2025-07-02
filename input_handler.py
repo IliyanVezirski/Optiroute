@@ -8,7 +8,8 @@ import re
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
 import logging
-from config import get_config, InputConfig
+import importlib
+import config
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +69,10 @@ class InputHandler:
     """Главен клас за обработка на входни данни"""
     
     def __init__(self):
-        self.config = get_config().input
+        import importlib
+        import config
+        importlib.reload(config)
+        self.config = config.get_config().input
     
     def load_data(self, file_path: Optional[str] = None) -> InputData:
         """Зарежда данни от файл"""
@@ -90,7 +94,7 @@ class InputHandler:
             valid_customers = [c for c in customers if c.coordinates is not None]
             
             # Получаване на депо координати
-            depot_location = get_config().locations.depot_location
+            depot_location = config.get_config().locations.depot_location
             
             input_data = InputData(
                 customers=valid_customers,

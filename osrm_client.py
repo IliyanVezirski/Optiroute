@@ -1240,7 +1240,7 @@ def get_customer_distance_matrix(customers, depot_location: Tuple[float, float])
 
 
 def get_distance_matrix_from_central_cache(locations: List[Tuple[float, float]]) -> Optional[DistanceMatrix]:
-    """Получава матрица с разстояния директно от централния кеш (ОПТИМИЗИРАНО)"""
+    """Получава матрица с разстояния директно от централния кеш (ПОДОБРЕНО с submatrix extraction)"""
     try:
         # Създаваме кеш инстанция
         cache = OSRMCache(
@@ -1254,9 +1254,23 @@ def get_distance_matrix_from_central_cache(locations: List[Tuple[float, float]])
             logger.info(f"💾 Намерена точна матрица в кеша за {len(locations)} локации")
             return cached_matrix
         
-        # Ако няма точно съвпадение, само логираме че няма данни
-        # НЕ правим подматрица extraction защото е много бавно
-        logger.info(f"❌ Няма точни данни в кеша за {len(locations)} локации")
+        # ВТОРО опитваме да извлечем от централната матрица
+        logger.info(f"🔍 Търся в централната матрица за {len(locations)} локации...")
+        central_matrix = cache.get_complete_central_matrix()
+        
+        if central_matrix:
+            logger.info(f"📊 Намерена централна матрица с {len(central_matrix.locations)} локации")
+            
+            # Опитваме да извлечем подматрица
+            submatrix = cache.extract_submatrix(central_matrix, locations)
+            if submatrix:
+                logger.info(f"✅ Извлечена подматрица {len(locations)}x{len(locations)} от централната матрица")
+                return submatrix
+            else:
+                logger.warning(f"⚠️ Не мога да извлека подматрица - някои локации липсват в централната матрица")
+        
+        # Ако няма данни
+        logger.info(f"❌ Няма данни в кеша за {len(locations)} локации")
         return None
         
     except Exception as e:
