@@ -164,7 +164,7 @@ class InteractiveMapGenerator:
                 return geometry
             else:
                 logger.warning(f"OSRM Route API грешка: {data.get('message', 'Неизвестна грешка')}")
-                return [start_coords, end_coords]
+            return [start_coords, end_coords]
             
         except Exception as e:
             logger.warning(f"Грешка при OSRM Route API заявка: {e}")
@@ -422,7 +422,7 @@ class InteractiveMapGenerator:
             collapsed=False,
             overlay=True,
             control=True
-        ).add_to(route_map)
+                ).add_to(route_map)
     
     def _add_legend(self, route_map: folium.Map, routes: List[Route]):
         """Добавя легенда на картата с информация за маршрутите"""
@@ -455,8 +455,8 @@ class InteractiveMapGenerator:
         <p style="margin: 5px 0; font-weight: bold;">🚌 Филтър на автобуси:</p>
         <p style="margin: 5px 0; font-size: 12px; color: #666;">
             Използвай контрола в горния десен ъгъл за показване/скриване на отделни автобуси
-        </p>
-        '''
+            </p>
+            '''
         
         # Добавяме информация за OSRM маршрутите
         osrm_status = "🛣️ OSRM маршрути" if self.use_osrm_routing else "📐 Прави линии"

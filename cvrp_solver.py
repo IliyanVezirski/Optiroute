@@ -357,6 +357,27 @@ class ORToolsSolver:
                 True,  # start cumul to zero
                 "Capacity",
             )
+
+            # 6a. MAX CUSTOMERS PER ROUTE (STOPS) CONSTRAINT
+            def stop_callback(from_index):
+                from_node = manager.IndexToNode(from_index)
+                # Depot не се брои като стоп
+                return 0 if from_node == 0 else 1
+            stop_callback_index = routing.RegisterUnaryTransitCallback(stop_callback)
+            # Създаваме списък с лимити за всеки автобус
+            vehicle_max_stops = []
+            for v in self.vehicle_configs:
+                if v.enabled:
+                    max_stops = v.max_customers_per_route if v.max_customers_per_route is not None else 99999
+                    for _ in range(v.count):
+                        vehicle_max_stops.append(max_stops)
+            routing.AddDimensionWithVehicleCapacity(
+                stop_callback_index,
+                0,  # slack
+                vehicle_max_stops,
+                True,  # start cumul to zero
+                "Stops",
+            )
             
             # 7. DISTANCE CONSTRAINTS
             if any(d < 999999999 for d in data['vehicle_max_distances']):

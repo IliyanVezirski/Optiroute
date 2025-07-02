@@ -40,8 +40,8 @@ class WarehouseManager:
         # Сортиране на клиентите
         sorted_customers = self._sort_customers(input_data.customers)
         
-        # Разпределение
-        if self.config.enable_warehouse and input_data.total_volume > total_capacity:
+        # Разпределение - ВИНАГИ използваме warehouse логиката за 80% правило
+        if self.config.enable_warehouse:
             return self._allocate_with_warehouse(sorted_customers, total_capacity)
         else:
             # Изчисляваме обема само на клиентите за автобуси
@@ -157,20 +157,31 @@ class WarehouseManager:
         
         logger.info(f"🚛 Максимален капацитет на автобус: {max_single_vehicle_capacity} ст.")
         
-        # СТЪПКА 1: Автоматично прехвърляме клиенти над капацитета в склада
+        # СТЪПКА 1: Автоматично прехвърляме заявки над X% от капацитета в склада
+        volume_threshold = max_single_vehicle_capacity * self.config.large_request_threshold
         warehouse_customers = []
         suitable_for_vehicles = []
         
+        logger.info(f"🔍 Проверявам за заявки над {volume_threshold:.1f} ст. ({self.config.large_request_threshold*100:.0f}% от {max_single_vehicle_capacity} ст.)")
+        
         for customer in customers:
-            if customer.volume > max_single_vehicle_capacity:
+            if customer.volume > volume_threshold:
                 warehouse_customers.append(customer)
-                logger.info(f"📦 {customer.name} ({customer.volume:.1f} ст.) → СКЛАД (над капацитета)")
+                logger.info(f"📦 {customer.name} ({customer.volume:.1f} ст.) → СКЛАД (над {self.config.large_request_threshold*100:.0f}% от капацитета)")
             else:
                 suitable_for_vehicles.append(customer)
         
-        # СТЪПКА 2: Оптимизирано разпределение за OR-Tools (70% вместо 85%)
-        target_capacity = int(total_capacity * 0.70)  # Намален процент за по-стабилно решение
-        logger.info(f"🎯 Целеви капацитет за OR-Tools: {target_capacity} ст. (70% от {total_capacity})")
+        # СТЪПКА 2: Автоматично прехвърляме клиенти над капацитета в склада
+        customers_over_capacity = [c for c in suitable_for_vehicles if c.volume > max_single_vehicle_capacity]
+        suitable_for_vehicles = [c for c in suitable_for_vehicles if c.volume <= max_single_vehicle_capacity]
+        
+        for customer in customers_over_capacity:
+            warehouse_customers.append(customer)
+            logger.info(f"📦 {customer.name} ({customer.volume:.1f} ст.) → СКЛАД (над капацитета)")
+        
+        # СТЪПКА 3: Оптимизирано разпределение за OR-Tools (target_utilization)
+        target_capacity = int(total_capacity * self.config.ortools_target_utilization)
+        logger.info(f"🎯 Целеви капацитет за OR-Tools: {target_capacity} ст. ({self.config.ortools_target_utilization*100:.0f}% от {total_capacity})")
         
         # Сортираме останалите клиенти от малък към голям за по-добро запълване
         suitable_for_vehicles.sort(key=lambda c: c.volume)
@@ -196,8 +207,8 @@ class WarehouseManager:
         logger.info(f"Разпределение завършено:")
         logger.info(f"  🚛 Автобуси: {len(vehicle_customers)} клиента ({vehicle_volume:.1f} ст.)")
         logger.info(f"  🏭 Склад: {len(warehouse_customers)} клиента ({warehouse_volume:.1f} ст.)")
-        logger.info(f"  📊 Използване капацитет: {actual_utilization:.1%} (цел: 70%)")
-        logger.info(f"  🤖 OR-Tools готовност: {'✅ Готов' if actual_utilization <= 0.75 else '⚠️ Рискован'}")
+        logger.info(f"  📊 Използване капацитет: {actual_utilization:.1%} (цел: {self.config.ortools_target_utilization*100:.0f}%)")
+        logger.info(f"  🤖 OR-Tools готовност: {'✅ Готов' if actual_utilization <= self.config.ortools_target_utilization else '⚠️ Рискован'}")
         
         # Проверка за валидност
         total_input_volume = sum(c.volume for c in customers)
@@ -213,8 +224,8 @@ class WarehouseManager:
             return allocation
         
         # ВАЖНО: Не оптимизираме ако разпределението е вече оптимално за OR-Tools
-        if allocation.capacity_utilization > 0.75:  # 75% threshold за OR-Tools стабилност
-            logger.info(f"🔒 Спирам оптимизацията: Използването е {allocation.capacity_utilization:.1%} (над 75% граница)")
+        if allocation.capacity_utilization > self.config.ortools_safe_utilization:
+            logger.info(f"🔒 Спирам оптимизацията: Използването е {allocation.capacity_utilization:.1%} (над {self.config.ortools_safe_utilization*100:.0f}% граница)")
             logger.info("🤖 Запазвам разпределението оптимално за OR-Tools")
             return allocation
         
@@ -227,8 +238,8 @@ class WarehouseManager:
         if available_capacity <= 0:
             return allocation
         
-        # Максимален допустим обем за OR-Tools стабилност (75%)
-        max_safe_volume = allocation.total_vehicle_capacity * 0.75
+        # Максимален допустим обем за OR-Tools стабилност (safe_utilization)
+        max_safe_volume = allocation.total_vehicle_capacity * self.config.ortools_safe_utilization
         remaining_safe_capacity = max_safe_volume - allocation.total_vehicle_volume
         
         if remaining_safe_capacity <= 0:
@@ -252,21 +263,28 @@ class WarehouseManager:
             else:
                 optimized_warehouse_customers.append(customer)
         
-        new_warehouse_volume = sum(c.volume for c in optimized_warehouse_customers)
-        new_utilization = current_volume / allocation.total_vehicle_capacity
+        # Преизчисляваме обемите
+        optimized_vehicle_volume = sum(c.volume for c in optimized_vehicle_customers)
+        optimized_warehouse_volume = sum(c.volume for c in optimized_warehouse_customers)
+        optimized_utilization = optimized_vehicle_volume / allocation.total_vehicle_capacity
         
         if moved_count > 0:
-            logger.info(f"✅ Преместени {moved_count} клиента, ново използване: {new_utilization:.1%}")
+            logger.info(f"✅ Преместени {moved_count} клиента от склад в автобуси")
+            logger.info(f"🎯 Финален резултат:")
+            logger.info(f"   🚛 Автобуси: {len(optimized_vehicle_customers)} клиента ({optimized_vehicle_volume:.1f} ст.)")
+            logger.info(f"   🏭 Склад: {len(optimized_warehouse_customers)} клиента ({optimized_warehouse_volume:.1f} ст.)")
+            logger.info(f"   📊 Използване: {optimized_utilization:.1%}")
+            logger.info(f"   🤖 OR-Tools стабилност: {'✅ Отлична' if optimized_utilization <= self.config.ortools_safe_utilization else '✅ Добра' if optimized_utilization <= 0.75 else '⚠️ Рискована'}")
         else:
-            logger.info(f"🔒 Няма безопасни клиенти за преместване")
+            logger.info(f"�� Няма безопасни клиенти за преместване")
         
         return WarehouseAllocation(
             vehicle_customers=optimized_vehicle_customers,
             warehouse_customers=optimized_warehouse_customers,
             total_vehicle_capacity=allocation.total_vehicle_capacity,
-            total_vehicle_volume=current_volume,
-            warehouse_volume=new_warehouse_volume,
-            capacity_utilization=new_utilization
+            total_vehicle_volume=optimized_vehicle_volume,
+            warehouse_volume=optimized_warehouse_volume,
+            capacity_utilization=optimized_utilization
         )
     
     def get_allocation_summary(self, allocation: WarehouseAllocation) -> Dict[str, Any]:

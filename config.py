@@ -28,6 +28,7 @@ class VehicleConfig:
     service_time_minutes: int = 15  # време на спирка в минути
     enabled: bool = True  # дали е включено
     start_location: Optional[Tuple[float, float]] = None  # специална стартова точка
+    max_customers_per_route: Optional[int] = None  # максимален брой клиенти на маршрут (None = без ограничение)
 
 
 @dataclass
@@ -78,6 +79,9 @@ class WarehouseConfig:
     sort_by_volume: bool = True  # сортиране от малък към голям
     move_largest_to_warehouse: bool = True  # най-големите заявки в склада
     warehouse_capacity_multiplier: float = 1.2  # колко пъти може да надвишава складa
+    large_request_threshold: float = 0.50 # процент за "голяма заявка" (напр. 0.8 = 80%)
+    ortools_target_utilization: float = 0.7  # целева утилизация за OR-Tools (напр. 0.7 = 70%)
+    ortools_safe_utilization: float = 0.75  # максимална безопасна утилизация (напр. 0.75 = 75%)
 
 
 @dataclass
@@ -87,8 +91,8 @@ class CVRPConfig:
     
     # OR-Tools настройки - оптимизирани за стабилност
     time_limit_seconds: int = 150
-    first_solution_strategy: str = "PATH_CHEAPEST_ARC"  
-    local_search_metaheuristic: str = "LOCAL_SEARCH"  
+    first_solution_strategy: str = "PATH_MOST_CONSTRAINED_ARC"  
+    local_search_metaheuristic: str = "TABU_SEARCH"  
     log_search: bool = True  # изключено за по-бързо изпълнение
     
     # Общи настройки
@@ -203,7 +207,8 @@ class MainConfig:
                 max_distance_km=50,
                 max_time_hours=8,
                 service_time_minutes=10,
-                enabled=True
+                enabled=True,
+                max_customers_per_route=None
             ),
             # 2. Център бус - 1 бр, 250 ст, стартира от център
             VehicleConfig(
@@ -214,7 +219,8 @@ class MainConfig:
                 max_time_hours=8,
                 service_time_minutes=10,
                 enabled=True,
-                start_location=self.locations.center_location
+                start_location=self.locations.center_location,
+                max_customers_per_route=None
             ),
             # 3. Външни бусове - 3 бр, 360 ст, 150км ограничение
             VehicleConfig(
@@ -224,7 +230,8 @@ class MainConfig:
                 max_distance_km=200,
                 max_time_hours=8,
                 service_time_minutes=10,
-                enabled=True
+                enabled=True,
+                max_customers_per_route=None
             )
         ]
 
