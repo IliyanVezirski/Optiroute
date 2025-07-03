@@ -10,97 +10,146 @@ from enum import Enum
 
 
 class VehicleType(Enum):
-    """Типове превозни средства"""
-    INTERNAL_BUS = "internal_bus"
-    CENTER_BUS = "center_bus" 
-    EXTERNAL_BUS = "external_bus"
-    DISABLED = "disabled"
+    """Типове превозни средства, използвани в системата."""
+    INTERNAL_BUS = "internal_bus"  # Стандартен бус за вътрешни маршрути
+    CENTER_BUS = "center_bus"      # Специализиран бус за централна градска част
+    EXTERNAL_BUS = "external_bus"  # Бус за дълги, извънградски маршрути
+    WAREHOUSE = "warehouse"        # Виртуален тип за заявки, които се обработват от склад
+    DISABLED = "disabled"          # Тип за изключени от употреба превозни средства
 
 
 @dataclass
 class VehicleConfig:
-    """Конфигурация за превозно средство"""
-    vehicle_type: VehicleType
-    capacity: int  # стотинки обем
-    count: int  # брой
-    max_distance_km: Optional[int] = None  # ограничение в км
-    max_time_hours: int = 8  # максимални часове работа
-    service_time_minutes: int = 15  # време на спирка в минути
-    enabled: bool = True  # дали е включено
-    start_location: Optional[Tuple[float, float]] = None  # специална стартова точка
-    max_customers_per_route: Optional[int] = None  # максимален брой клиенти на маршрут (None = без ограничение)
+    """Конфигурация за един тип превозно средство."""
+    vehicle_type: VehicleType  # Тип на превозното средство (от VehicleType enum)
+    capacity: int              # Максимален капацитет/обем (в стотинки, грамове или друга единица)
+    count: int                 # Брой налични превозни средства от този тип
+    max_distance_km: Optional[int] = None  # Максимален пробег в километри за един маршрут. None означава без лимит.
+    max_time_hours: int = 8    # Максимално време за работа по един маршрут в часове (включва пътуване и обслужване).
+    service_time_minutes: int = 15 # Средно време за обслужване на един клиент в минути. Добавя се към общото време на маршрута.
+    enabled: bool = True       # Дали този тип превозно средство е активно и може да се използва от solver-а.
+    start_location: Optional[Tuple[float, float]] = None  # Персонална начална точка (депо) за този тип. Ако е None, използва се главното депо.
+    max_customers_per_route: Optional[int] = None # Максимален брой клиенти, които могат да бъдат обслужени в един маршрут. None = без ограничение.
 
 
 @dataclass
 class LocationConfig:
-    """GPS координати за важни локации"""
-    depot_location: Tuple[float, float] = (42.695785029219415, 23.23165887245312)  # Стартова точка
-    center_location: Tuple[float, float] = (42.69773576871825, 23.321588606946342)  # Точка център
+    """GPS координати за важни локации в системата."""
+    depot_location: Tuple[float, float] = (42.695785029219415, 23.23165887245312)  # Главно депо, от което тръгват повечето превозни средства.
+    center_location: Tuple[float, float] = (42.69773576871825, 23.321588606946342) # Специална локация "Център", използвана за CENTER_BUS.
 
 
 @dataclass
 class OSRMConfig:
-    """Конфигурации за OSRM заявки"""
-    base_url: str = "http://localhost:5000"  # локален OSRM сървър
-    profile: str = "driving"  # driving, walking, cycling
-    chunk_size: int = 80  # увеличен размер за по-ефективно обработване
-    timeout_seconds: int = 45  # по-дълъг timeout за големи заявки
-    retry_attempts: int = 3
-    retry_delay_seconds: int = 1
-    average_speed_kmh: float = 40.0  # средна скорост за изчисления
-    use_cache: bool = True
-    cache_expiry_hours: int = 24
+    """Конфигурации за връзка с OSRM (Open Source Routing Machine) сървър за изчисляване на разстояния и времена."""
+    base_url: str = "http://localhost:5000"  # Адрес на локално инсталиран OSRM сървър.
+    profile: str = "driving"  # Профил за маршрутизация. Възможни: "driving", "walking", "cycling".
+    chunk_size: int = 80  # Брой локации, които се изпращат в една заявка към OSRM. По-голям chunk = по-малко заявки, но повече памет.
+    timeout_seconds: int = 45  # Максимално време за изчакване на отговор от OSRM сървъра.
+    retry_attempts: int = 3    # Брой опити при неуспешна OSRM заявка.
+    retry_delay_seconds: int = 1 # Време за изчакване между неуспешните опити.
+    average_speed_kmh: float = 40.0 # Резервна средна скорост, ако OSRM не върне време за пътуване.
+    use_cache: bool = True # Дали да се кешират резултатите от OSRM, за да се избегнат повторни заявки.
+    cache_expiry_hours: int = 24 # Време, след което кешът се счита за невалиден.
     
-    # Локални OSRM настройки
-    fallback_to_public: bool = True  # включено - използваме публичен сървър като fallback
-    public_osrm_url: str = "http://router.project-osrm.org"  # backup URL
+    # Настройки за резервен (fallback) OSRM сървър
+    fallback_to_public: bool = True  # Ако локалният сървър не отговаря, да се използва ли публичният.
+    public_osrm_url: str = "http://router.project-osrm.org"  # Адрес на публичния OSRM сървър.
     
-    # Настройки за ефективност
-    max_locations_for_osrm: int = 50  # над този брой - директно приблизителни стойности
-    enable_smart_chunking: bool = True  # интелигентно chunking за ефективност
+    # Настройки за оптимизация на OSRM заявките
+    max_locations_for_osrm: int = 50 # Максимален брой локации, за които се прави реална заявка. Над този брой се използват приблизителни изчисления.
+    enable_smart_chunking: bool = True # Интелигентно разделяне на заявките на части за по-голяма ефективност.
 
 
 @dataclass
 class InputConfig:
-    """Конфигурации за входни данни"""
-    excel_file_path: str = "data/input.xlsx"
-    gps_column: str = "GpsData"
-    client_id_column: str = "Клиент"
-    client_name_column: str = "Име клиент"
-    volume_column: str = "Обем"
-    sheet_name: Optional[str] = None  # ако е None, взема първия лист
-    encoding: str = "utf-8"
+    """Конфигурации за обработка на входните данни от Excel файл."""
+    excel_file_path: str = "data/input.xlsx" # Път до входния Excel файл.
+    gps_column: str = "GpsData"         # Име на колоната с GPS координатите на клиентите.
+    client_id_column: str = "Клиент"      # Име на колоната с ID на клиента.
+    client_name_column: str = "Име Клиент" # Име на колоната с името на клиента.
+    volume_column: str = "Обем"           # Име на колоната с обема/теглото на заявката.
+    sheet_name: Optional[str] = None  # Име на листа в Excel файла. Ако е None, използва се първият наличен.
+    encoding: str = "utf-8"           # Кодировка на файла.
 
 
 @dataclass
 class WarehouseConfig:
-    """Конфигурации за склад"""
-    enable_warehouse: bool = True  # Включваме warehouse за балансиране
-    sort_by_volume: bool = True  # сортиране от малък към голям
-    move_largest_to_warehouse: bool = True  # най-големите заявки в склада
-    warehouse_capacity_multiplier: float = 1.2  # колко пъти може да надвишава складa
-    large_request_threshold: float = 0.50 # процент за "голяма заявка" (напр. 0.8 = 80%)
-    ortools_target_utilization: float = 0.7  # целева утилизация за OR-Tools (напр. 0.7 = 70%)
-    ortools_safe_utilization: float = 0.75  # максимална безопасна утилизация (напр. 0.75 = 75%)
+    """Конфигурации за логиката на склада, който обработва част от заявките предварително."""
+    enable_warehouse: bool = True  # Дали да се използва логиката за предварително отделяне на заявки за склада.
+    sort_by_volume: bool = True  # Дали заявките да се сортират по обем преди обработка.
+    move_largest_to_warehouse: bool = False # Ако е True, най-големите заявки се отделят за склада. Ако е False, всички отиват към solver-а.
+    warehouse_capacity_multiplier: float = 1.2 # Множител, който определя капацитета на склада спрямо общия капацитет на бусовете.
+    large_request_threshold: float = 0.8 # Праг (като процент от капацитета на най-големия бус), над който една заявка се счита за "голяма".
 
 
 @dataclass
 class CVRPConfig:
-    """Конфигурации за CVRP алгоритъм"""
-    algorithm: str = "or_tools"  # or_tools, genetic, simulated_annealing, ant_colony
+    """Конфигурации за CVRP (Capacitated Vehicle Routing Problem) алгоритъма на OR-Tools."""
+    algorithm: str = "or_tools"  # Основен алгоритъм. В момента се поддържа само "or_tools".
     
-    # OR-Tools настройки - оптимизирани за стабилност
-    time_limit_seconds: int = 150
-    first_solution_strategy: str = "PATH_MOST_CONSTRAINED_ARC"  
-    local_search_metaheuristic: str = "TABU_SEARCH"  
-    log_search: bool = True  # изключено за по-бързо изпълнение
+    # --- OR-Tools Search Parameters ---
+    time_limit_seconds: int = 300 # Максимално време в секунди, което solver-ът има за намиране на решение.
+
+    # Стратегия за намиране на първоначално ("първо") решение. Доброто начално решение
+    # често води до по-добър финален резултат, но може да отнеме повече време.
+    #   - "PATH_CHEAPEST_ARC": Най-бързата. Просто свързва най-близките точки една по една. Подходяща за бързи тестове.
+    #   - "AUTOMATIC": Solver-ът сам избира най-подходящата стратегия. Балансиран избор.
+    #   - "SAVINGS": Класически, по-бавен метод, който често дава добри резултати.
+    #   - "CHRISTOFIDES": Най-изчислително скъпа, но много качествена стратегия, особено за сложни проблеми.
+    first_solution_strategy: str = "CHRISTOFIDES"
+
+    # Метаевристика за локално търсене, която подобрява намереното решение. Помага на solver-а
+    # да избегне "засядане" в локални оптимуми и да намери по-глобално добро решение.
+    #   - "GUIDED_LOCAL_SEARCH": Мощна и препоръчителна стратегия за VRP проблеми.
+    #   - "SIMULATED_ANNEALING": Класическа алтернатива.
+    #   - "TABU_SEARCH": Друга класическа алтернатива.
+    local_search_metaheuristic: str = "GUIDED_LOCAL_SEARCH"
     
-    # Общи настройки
-    max_iterations: int = 1000  # за други алгоритми
-    parallel_processing: bool = True
-    random_seed: Optional[int] = None
+    # Използване на "пълна пропагация" на ограниченията. Това забавя всяка стъпка от търсенето, но може
+    # да "отреже" по-големи части от дървото на възможните решения, водейки до по-добри
+    # резултати при проблеми със сложни ограничения. Изисква повече памет.
+    use_full_propagation: bool = True
+
+    # Времеви лимит (в секунди) за всяка отделна стъпка на локално търсене (Large Neighborhood Search).
+    # По-висока стойност (напр. 0.5 или 1.0) дава повече време на LNS да подобри решението на всяка стъпка,
+    # което може да подобри крайния резултат, но за сметка на общата скорост.
+    lns_time_limit_seconds: float = 0.5
+
+    log_search: bool = True # Дали OR-Tools да извежда детайлен лог на процеса на търсене. Полезно за дебъгване.
     
-    # Deprecated генетичен алгоритъм настройки (запазени за съвместимост)
+    # Множител за "наказание" при преминаване между различни географски сектори (дефинирани около депото).
+    # Стойност 1.0 на практика изключва тази функционалност. Стойности > 1.0 карат solver-а да
+    # групира клиентите по сектори, което може да ускори търсенето, но с риск за неоптимални маршрути.
+    sector_penalty_multiplier: float = 1.5
+    
+    # --- Dropped Customers (Disjunctions) Settings ---
+    # Логика, по която solver-ът решава кои клиенти да пропусне, ако е невъзможно да обслужи всички.
+    #   - "PRIORITIZE_LARGEST": Приоритет е да се обслужат клиентите с НАЙ-ГОЛЕМИ заявки. По-висока "неустойка" за пропускане на голяма заявка.
+    #   - "PRIORITIZE_SMALLEST": Приоритет е да се обслужат клиентите с НАЙ-МАЛКИ заявки. По-висока "неустойка" за пропускане на малка заявка.
+    #   - "MINIMIZE_DROPPED_COUNT": Основен приоритет е да се обслужи МАКСИМАЛЕН БРОЙ клиенти, независимо от обема им. Всички клиенти имат еднакво висока неустойка.
+    drop_penalty_logic: str = "MINIMIZE_DROPPED_COUNT"
+    
+    # Множител, използван само при drop_penalty_logic = "PRIORITIZE_LARGEST".
+    # По-висока стойност означава по-голям стимул за solver-а да не пропуска големи заявки.
+    # Неустойката се изчислява като (обем * множител).
+    drop_penalty_volume_multiplier: int = 10000
+    
+    # Скалар, използван само при drop_penalty_logic = "PRIORITIZE_SMALLEST".
+    # По-висока стойност означава по-голяма защита за малките заявки от пропускане.
+    # Неустойката се изчислява като (скалар / обем).
+    drop_penalty_inverse_volume_scaler: int = 100000
+    
+    # Фиксирана стойност, използвана само при drop_penalty_logic = "MINIMIZE_DROPPED_COUNT".
+    # Задава много висока, еднаква неустойка за пропускането на който и да е клиент.
+    drop_penalty_uniform_high_value: int = 9999999
+    
+    # --- Deprecated/Legacy Algorithm Settings ---
+    max_iterations: int = 1000  # Максимален брой итерации за стари алгоритми (генетичен, и др.)
+    parallel_processing: bool = True # Дали да се използва паралелна обработка (ако алгоритъмът го поддържа).
+    random_seed: Optional[int] = None # Seed за генератора на случайни числа за възпроизводимост на резултатите.
+    
+    # Настройки за генетичен алгоритъм (запазени за съвместимост, не се използват активно)
     population_size: int = 100
     mutation_rate: float = 0.1
     crossover_rate: float = 0.8
@@ -110,70 +159,70 @@ class CVRPConfig:
 
 @dataclass
 class OutputConfig:
-    """Конфигурации за изходни данни"""
-    # Карта
-    enable_interactive_map: bool = True
-    map_output_file: str = "output/interactive_map.html"
-    map_zoom_level: int = 12
-    show_route_colors: bool = True
-    show_vehicle_info: bool = True
+    """Конфигурации за генериране на изходни файлове (карти, Excel отчети, графики)."""
+    # Интерактивна карта
+    enable_interactive_map: bool = True # Дали да се генерира HTML файл с интерактивна карта на маршрутите.
+    map_output_file: str = "output/interactive_map.html" # Път и име на файла за картата.
+    map_zoom_level: int = 12 # Начално приближение на картата.
+    show_route_colors: bool = True # Дали различните маршрути да се оцветяват в различни цветове.
+    show_vehicle_info: bool = True # Дали да се показва информация за превозното средство при клик на маршрут.
     
     # Excel файлове
-    excel_output_dir: str = "output/excel"
-    warehouse_excel_file: str = "warehouse_orders.xlsx"
-    routes_excel_file: str = "vehicle_routes.xlsx"
-    efficiency_excel_file: str = "efficiency_report.xlsx"
+    excel_output_dir: str = "output/excel" # Директория за запис на Excel отчетите.
+    warehouse_excel_file: str = "warehouse_orders.xlsx" # Име на файла с необслужените клиенти (за склада).
+    routes_excel_file: str = "vehicle_routes.xlsx" # Име на файла с детайли за всеки маршрут.
+    efficiency_excel_file: str = "efficiency_report.xlsx" # Име на файла с отчет за ефективността.
     
-    # Чартове и анализи
-    enable_charts: bool = True
-    charts_output_dir: str = "output/charts"
-    efficiency_chart_file: str = "efficiency_analysis.png"
-    route_comparison_file: str = "route_comparison.png"
-    volume_distribution_file: str = "volume_distribution.png"
+    # Графики и анализи
+    enable_charts: bool = True # Дали да се генерират PNG файлове с графики.
+    charts_output_dir: str = "output/charts" # Директория за запис на графиките.
+    efficiency_chart_file: str = "efficiency_analysis.png" # Графика с анализ на ефективността.
+    route_comparison_file: str = "route_comparison.png" # Графика, сравняваща маршрутите.
+    volume_distribution_file: str = "volume_distribution.png" # Графика с разпределението на обемите.
     
-    # Детайлна информация
-    include_detailed_info: bool = True
-    show_km_info: bool = True
-    show_time_info: bool = True
-    show_volume_info: bool = True
+    # Детайли в изходните файлове
+    include_detailed_info: bool = True # Дали да се включва допълнителна информация в отчетите.
+    show_km_info: bool = True # Дали да се показва информация за километри.
+    show_time_info: bool = True # Дали да се показва информация за време.
+    show_volume_info: bool = True # Дали да се показва информация за обем.
 
 
 @dataclass
 class LoggingConfig:
-    """Конфигурации за логиране"""
-    log_level: str = "INFO"  # DEBUG, INFO, WARNING, ERROR
-    log_file: str = "logs/cvrp.log"
-    log_format: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    enable_console_logging: bool = True
-    enable_file_logging: bool = True
-    max_log_size_mb: int = 10
-    backup_count: int = 5
+    """Конфигурации за системата за логиране."""
+    log_level: str = "INFO"  # Ниво на логиране: DEBUG, INFO, WARNING, ERROR, CRITICAL.
+    log_file: str = "logs/cvrp.log" # Път до лог файла.
+    log_format: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s" # Формат на съобщенията в лога.
+    enable_console_logging: bool = True # Дали да се печатат логове в конзолата.
+    enable_file_logging: bool = True # Дали да се записват логове във файл.
+    max_log_size_mb: int = 10 # Максимален размер на лог файла в мегабайти, преди да се архивира.
+    backup_count: int = 5 # Брой архивирани лог файлове, които да се пазят.
 
 
 @dataclass
 class CacheConfig:
-    """Конфигурации за кеширане"""
-    enable_cache: bool = True
-    cache_dir: str = "cache"
-    osrm_cache_file: str = "osrm_matrix_cache.json"
-    routes_cache_file: str = "routes_cache.json"
-    cache_expiry_hours: int = 24
-    max_cache_size_mb: int = 100
+    """Конфигурации за системата за кеширане."""
+    enable_cache: bool = True # Дали кеширането е активно.
+    cache_dir: str = "cache" # Директория, в която се съхраняват кеш файловете.
+    osrm_cache_file: str = "osrm_matrix_cache.json" # Файл за кеширане на OSRM матриците с разстояния.
+    routes_cache_file: str = "routes_cache.json" # Файл за кеширане на готови решения.
+    cache_expiry_hours: int = 24 # Време в часове, след което кешът се счита за невалиден.
+    max_cache_size_mb: int = 100 # Максимален размер на кеш директорията.
 
 
 @dataclass
 class PerformanceConfig:
-    """Конфигурации за производителност"""
-    max_concurrent_requests: int = 10
-    chunk_processing_delay: float = 0.1  # секунди между chunks
-    memory_limit_mb: int = 1024
-    enable_multiprocessing: bool = True
-    max_workers: int = 4
+    """Конфигурации, свързани с производителността на приложението."""
+    max_concurrent_requests: int = 10 # Максимален брой едновременни заявки (напр. към OSRM).
+    chunk_processing_delay: float = 0.1  # Време за изчакване в секунди между обработката на отделни "chunks".
+    memory_limit_mb: int = 1024 # Ограничение на паметта (информативно, не се налага стриктно).
+    enable_multiprocessing: bool = True # Дали да се използва multiprocessing за ускоряване на изчисления.
+    max_workers: int = 4 # Максимален брой паралелни процеси/нишки.
 
 
 @dataclass
 class MainConfig:
-    """Главна конфигурация която съдържа всички останали"""
+    """Главна конфигурация, която обединява всички останали модулни конфигурации."""
     # Модулни конфигурации
     locations: LocationConfig = LocationConfig()
     vehicles: Optional[List[VehicleConfig]] = None
@@ -186,29 +235,29 @@ class MainConfig:
     cache: CacheConfig = CacheConfig()
     performance: PerformanceConfig = PerformanceConfig()
     
-    # Глобални настройки
-    debug_mode: bool = False
-    verbose: bool = True
-    dry_run: bool = False  # тестово изпълнение без реални операции
+    # Глобални настройки на приложението
+    debug_mode: bool = False # Включва/изключва дебъг режим с по-детайлни логове.
+    verbose: bool = True # Дали да се извежда по-подробна информация в конзолата.
+    dry_run: bool = False  # "Сухо" изпълнение - изпълнява се цялата логика, но без реални операции като запис на файлове.
     
     def __post_init__(self):
-        """Инициализира default vehicle конфигурации"""
+        """Инициализира default конфигурации за превозните средства, ако не са зададени."""
         if self.vehicles is None:
             self.vehicles = self._create_default_vehicles()
     
     def _create_default_vehicles(self) -> List[VehicleConfig]:
-        """Създава default конфигурации за превозните средства"""
+        """Създава стандартен set от превозни средства, ако не е дефиниран друг."""
         return [
-            # 1. Вътрешни бусове - 4 бр, 360 ст, 50км ограничение
+            # 1. Вътрешни бусове - 4 бр, 360 ст, 60км ограничение
             VehicleConfig(
                 vehicle_type=VehicleType.INTERNAL_BUS,
                 capacity=360,
                 count=4,
-                max_distance_km=50,
+                max_distance_km=60,
                 max_time_hours=8,
-                service_time_minutes=10,
+                service_time_minutes=15,
                 enabled=True,
-                max_customers_per_route=None
+                max_customers_per_route=40
             ),
             # 2. Център бус - 1 бр, 250 ст, стартира от център
             VehicleConfig(
@@ -217,21 +266,21 @@ class MainConfig:
                 count=1,
                 max_distance_km=40,
                 max_time_hours=8,
-                service_time_minutes=10,
+                service_time_minutes=15,
                 enabled=True,
                 start_location=self.locations.center_location,
-                max_customers_per_route=None
+                max_customers_per_route=40
             ),
             # 3. Външни бусове - 3 бр, 360 ст, 150км ограничение
             VehicleConfig(
                 vehicle_type=VehicleType.EXTERNAL_BUS,
                 capacity=360,
                 count=3,
-                max_distance_km=200,
-                max_time_hours=8,
+                max_distance_km=150,
+                max_time_hours=10,
                 service_time_minutes=10,
                 enabled=True,
-                max_customers_per_route=None
+                max_customers_per_route=40
             )
         ]
 

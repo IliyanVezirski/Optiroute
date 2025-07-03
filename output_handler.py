@@ -172,10 +172,28 @@ class InteractiveMapGenerator:
             return [start_coords, end_coords]
     
     def _get_full_route_geometry(self, waypoints: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
-        """Получава пълната геометрия за маршрут с множество точки от OSRM"""
+        """Получава пълната геометрия за маршрут с множество точки от OSRM.
+        Ако има твърде много точки, използваме fallback за по-бърза работа.
+        """
         if len(waypoints) < 2:
             return waypoints
-        
+
+        # ОПТИМИЗАЦИЯ: Ако маршрутът има твърде много точки, не търсим пълна геометрия,
+        # а чертаем сегменти, за да не претоварваме OSRM и да ускорим процеса.
+        MAX_WAYPOINTS_FOR_FULL_GEOMETRY = 15
+        if len(waypoints) > MAX_WAYPOINTS_FOR_FULL_GEOMETRY:
+            logger.info(f"🌀 Маршрутът има {len(waypoints)} точки (> {MAX_WAYPOINTS_FOR_FULL_GEOMETRY}). "
+                        f"Използвам опростена геометрия (сегменти) за по-бърза работа.")
+            full_geometry = []
+            for i in range(len(waypoints) - 1):
+                # За всеки сегмент взимаме геометрията (или права линия при грешка)
+                segment_geometry = self._get_osrm_route_geometry(waypoints[i], waypoints[i+1])
+                if i > 0:
+                    # Премахваме първата точка, за да няма дублиране
+                    segment_geometry = segment_geometry[1:]
+                full_geometry.extend(segment_geometry)
+            return full_geometry
+
         try:
             import requests
             from config import get_config
@@ -210,15 +228,15 @@ class InteractiveMapGenerator:
         except Exception as e:
             logger.warning(f"Грешка при OSRM Route API заявка за пълен маршрут: {e}")
             # Fallback към последователност от прави линии
-        full_geometry = []
-        for i in range(len(waypoints) - 1):
-            segment = self._get_osrm_route_geometry(waypoints[i], waypoints[i + 1])
-            if i == 0:
-                full_geometry.extend(segment)
-            else:
-                full_geometry.extend(segment[1:])  # Пропускаме дублираната точка
-        
-        return full_geometry if full_geometry else waypoints
+            full_geometry = []
+            for i in range(len(waypoints) - 1):
+                segment = self._get_osrm_route_geometry(waypoints[i], waypoints[i + 1])
+                if i == 0:
+                    full_geometry.extend(segment)
+                else:
+                    full_geometry.extend(segment[1:])  # Пропускаме дублираната точка
+            
+            return full_geometry if full_geometry else waypoints
     
     def _add_routes_to_map(self, route_map: folium.Map, routes: List[Route], depot_location: Tuple[float, float]):
         """Добавя маршрутите на картата с OSRM геометрия и филтър за бусовете"""
@@ -551,41 +569,46 @@ class ExcelExporter:
                 })
         
         df = pd.DataFrame(data)
-        df.to_excel(file_path, index=False)
+        df.to_excel(file_path, index=False, engine='openpyxl')
         
         logger.info(f"Маршрути експортирани в {file_path}")
         return file_path
 
 
 class OutputHandler:
-    """Главен клас за обработка на изходни данни"""
+    """Главен клас за управление на изходните данни"""
     
     def __init__(self, config: Optional[OutputConfig] = None):
         self.config = config or get_config().output
-        self.map_generator = InteractiveMapGenerator(self.config)
         self.excel_exporter = ExcelExporter(self.config)
     
     def generate_all_outputs(self, solution: CVRPSolution, 
                            warehouse_allocation: WarehouseAllocation,
                            depot_location: Tuple[float, float]) -> Dict[str, str]:
-        """Генерира всички изходни файлове"""
+        """Генерира всички изходни файлове и връща речник с пътищата до тях"""
         logger.info("Започвам генериране на изходни файлове")
-        
         output_files = {}
-        
-        # Интерактивна карта (БЕЗ складови клиенти)
+
+        # 1. Интерактивна карта
         if self.config.enable_interactive_map:
-            route_map = self.map_generator.create_map(solution, warehouse_allocation, depot_location)
-            map_file = self.map_generator.save_map(route_map)
+            map_gen = InteractiveMapGenerator(self.config)
+            route_map = map_gen.create_map(solution, warehouse_allocation, depot_location)
+            map_file = map_gen.save_map(route_map)
             output_files['map'] = map_file
         
-        # Excel файлове
-        warehouse_file = self.excel_exporter.export_warehouse_orders(warehouse_allocation.warehouse_customers)
-        if warehouse_file:
-            output_files['warehouse_excel'] = warehouse_file
+        # 2. Обединяване на всички необслужени клиенти и експорт
+        all_unserviced_customers = warehouse_allocation.warehouse_customers + solution.dropped_customers
+        if all_unserviced_customers:
+            logger.info(f"Общо необслужени клиенти (склад + пропуснати): {len(all_unserviced_customers)}")
+            warehouse_file = self.excel_exporter.export_warehouse_orders(all_unserviced_customers)
+            if warehouse_file:
+                output_files['warehouse_excel'] = warehouse_file
         
-        routes_file = self.excel_exporter.export_vehicle_routes(solution)
-        output_files['routes_excel'] = routes_file
+        # 3. Експорт на маршрутите
+        if solution.routes:
+            routes_file = self.excel_exporter.export_vehicle_routes(solution)
+            if routes_file:
+                output_files['routes_excel'] = routes_file
         
         logger.info(f"Генерирани {len(output_files)} изходни файла")
         return output_files

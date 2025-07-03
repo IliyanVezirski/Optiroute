@@ -136,9 +136,10 @@ class CVRPApplication:
         self.logger.info(f"  Депо координати: {input_data.depot_location}")
         
         # Разпределение
+        total_unserviced = len(warehouse_allocation.warehouse_customers) + len(final_params.dropped_customers)
         self.logger.info("\nРАЗПРЕДЕЛЕНИЕ:")
         self.logger.info(f"  Клиенти за превозни средства: {len(warehouse_allocation.vehicle_customers)}")
-        self.logger.info(f"  Клиенти за склад: {len(warehouse_allocation.warehouse_customers)}")
+        self.logger.info(f"  Необслужени клиенти (склад/пропуснати): {total_unserviced}")
         self.logger.info(f"  Капацитет превозни средства: {warehouse_allocation.total_vehicle_capacity} ст.")
         self.logger.info(f"  Използван капацитет: {warehouse_allocation.total_vehicle_volume:.2f} ст.")
         self.logger.info(f"  Процент използване: {warehouse_allocation.capacity_utilization*100:.1f}%")
@@ -165,7 +166,8 @@ class CVRPApplication:
         # Изходни файлове
         self.logger.info("\nГЕНЕРИРАНИ ФАЙЛОВЕ:")
         for file_type, file_path in output_files.items():
-            self.logger.info(f"  {file_type}: {file_path}")
+            file_type_name = file_type.replace('_', ' ').title()
+            self.logger.info(f"  {file_type_name}: {file_path}")
         
         self.logger.info("="*50)
     

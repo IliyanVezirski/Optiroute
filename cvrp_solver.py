@@ -129,6 +129,7 @@ class Route:
 class CVRPSolution:
     """Цялостно решение на CVRP проблема"""
     routes: List[Route]
+    dropped_customers: List[Customer]  # Клиенти, които solver-ът е избрал да пропусне
     total_distance_km: float
     total_time_minutes: float
     total_vehicles_used: int
@@ -291,16 +292,17 @@ class ORToolsSolver:
             # добавяме голяма penalty
             if not self._are_points_in_same_sector(from_node, to_node):
                 # Увеличаваме разстоянието значително
-                return int(base_distance * 3)
+                return int(base_distance * self.config.sector_penalty_multiplier)
             
             # За точки в един и същ сектор, използваме реалното разстояние
             return int(base_distance)
+        return distance_callback
         
     def solve(self) -> CVRPSolution:
         """Решава CVRP с OR-Tools и multiple depots поддръжка"""
         if not ORTOOLS_AVAILABLE:
             logger.error("❌ OR-Tools не е инсталиран")
-            return CVRPSolution([], 0, 0, 0, 0, False)
+            return CVRPSolution([], [], 0, 0, 0, 0, False)
         
         try:
             # 1. Създаване на data model
@@ -323,13 +325,10 @@ class ORToolsSolver:
             # 3. Създаване на Routing Model
             routing = pywrapcp.RoutingModel(manager)
             
-            # 4. Distance callback
-            def distance_callback(from_index, to_index):
-                from_node = manager.IndexToNode(from_index)
-                to_node = manager.IndexToNode(to_index)
-                return data['distance_matrix'][from_node][to_node]
-            
-            transit_callback_index = routing.RegisterTransitCallback(distance_callback)
+            # 4. Distance callback с penalty за сектори
+            logger.info("🚚 Активирам penalty за сектори, за да групирам маршрутите географски.")
+            sector_callback = self._distance_callback_wrapper(manager)
+            transit_callback_index = routing.RegisterTransitCallback(sector_callback)
             routing.SetArcCostEvaluatorOfAllVehicles(transit_callback_index)
             
             # 5. ПРИОРИТИЗАЦИЯ на центъра чрез fixed costs
@@ -352,7 +351,7 @@ class ORToolsSolver:
             demand_callback_index = routing.RegisterUnaryTransitCallback(demand_callback)
             routing.AddDimensionWithVehicleCapacity(
                 demand_callback_index,
-                0,  # null capacity slack
+                10,  # null capacity slack
                 data['vehicle_capacities'],  # vehicle maximum capacities
                 True,  # start cumul to zero
                 "Capacity",
@@ -373,7 +372,7 @@ class ORToolsSolver:
                         vehicle_max_stops.append(max_stops)
             routing.AddDimensionWithVehicleCapacity(
                 stop_callback_index,
-                0,  # slack
+                10,  # slack
                 vehicle_max_stops,
                 True,  # start cumul to zero
                 "Stops",
@@ -381,40 +380,86 @@ class ORToolsSolver:
             
             # 7. DISTANCE CONSTRAINTS
             if any(d < 999999999 for d in data['vehicle_max_distances']):
-                logger.info("✅ Distance constraints ВКЛЮЧЕНИ с 20% tolerance за OR-Tools")
-                tolerant_limits = [int(d * 1.2) for d in data['vehicle_max_distances']]
-                logger.info(f"   Original limits: {[d//1000 for d in data['vehicle_max_distances']]} км")
-                logger.info(f"   Tolerant limits: {[d//1000 for d in tolerant_limits]} км")
-                
-                distance_dimension = routing.GetDimensionOrDie("Capacity")  # Използваме capacity dimension
-                
-                for vehicle_id in range(data['num_vehicles']):
-                    if tolerant_limits[vehicle_id] < 999999999:
-                        routing.AddVariableMaximizedByFinalizer(
-                            distance_dimension.CumulVar(routing.Start(vehicle_id))
-                        )
-                        routing.AddVariableMaximizedByFinalizer(
-                            distance_dimension.CumulVar(routing.End(vehicle_id))
-                        )
+                logger.info("✅ Distance constraints ВКЛЮЧЕНИ")
+                dimension_name = "Distance"
+                routing.AddDimensionWithVehicleCapacity(
+                    transit_callback_index,
+                    0,  # no slack for distance
+                    data['vehicle_max_distances'],  # vehicle maximum distances in meters
+                    True,  # start cumul to zero
+                    dimension_name
+                )
+                distance_dimension = routing.GetDimensionOrDie(dimension_name)
+                # Penalize long routes to guide the solver. The hard limit is set by the dimension itself.
+                distance_dimension.SetGlobalSpanCostCoefficient(100)
+
+                logger.info(f"   Зададени лимити (км): "
+                            f"{[f'{d/1000:.0f}' if d < 999999999 else 'N/A' for d in data['vehicle_max_distances']]}")
             
             # 8. VEHICLE TYPE CONSTRAINTS
             self._add_vehicle_type_constraints(routing, manager, data)
             
-            # 9. SEARCH PARAMETERS
+            # 9. ALLOW DROPPING NODES (DISJUNCTIONS) WITH PENALTIES
+            logger.info(f"✅ Активирам пропускане на клиенти с penalty (логика: {self.config.drop_penalty_logic})")
+            num_depots = len(self.unique_depots)
+            
+            # Референтното депо за измерване на разстояние е винаги на индекс 0
+            main_depot_node_index = 0
+
+            for node_index in range(num_depots, len(data['distance_matrix'])):
+                customer_index = node_index - num_depots
+                customer = self.customers[customer_index]
+                
+                # Вземаме разстоянието от основното депо до клиента
+                distance_m = data['distance_matrix'][main_depot_node_index][node_index]
+                distance_km = (distance_m / 1000) + 0.1 # епсилон против делене на 0
+
+                final_penalty = 0
+                if self.config.drop_penalty_logic == "MINIMIZE_DROPPED_COUNT":
+                    # УНИФОРМНА ЛОГИКА: Всички клиенти са еднакво "скъпи" за пропускане
+                    final_penalty = self.config.drop_penalty_uniform_high_value
+                
+                elif self.config.drop_penalty_logic == "PRIORITIZE_SMALLEST":
+                    # ОБРАТНА ЛОГИКА: по-висока неустойка за МАЛКИ заявки
+                    volume = customer.volume + 0.1 # епсилон
+                    penalty_component = self.config.drop_penalty_inverse_volume_scaler / volume
+                    final_penalty = int((penalty_component / distance_km) * 100) + 100
+
+                else: # "PRIORITIZE_LARGEST" (поведение по подразбиране)
+                    # СТАНДАРТНА ЛОГИКА: по-висока неустойка за ГОЛЕМИ заявки
+                    penalty_component = customer.volume * self.config.drop_penalty_volume_multiplier
+                    final_penalty = int((penalty_component / distance_km) * 100) + 100
+                
+                routing.AddDisjunction([manager.NodeToIndex(node_index)], final_penalty)
+
+            # 10. SEARCH PARAMETERS
             search_parameters = pywrapcp.DefaultRoutingSearchParameters()
-            search_parameters.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.SAVINGS
-            search_parameters.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
+            search_parameters.first_solution_strategy = getattr(
+                routing_enums_pb2.FirstSolutionStrategy, 
+                self.config.first_solution_strategy
+            )
+            search_parameters.local_search_metaheuristic = getattr(
+                routing_enums_pb2.LocalSearchMetaheuristic,
+                self.config.local_search_metaheuristic
+            )
             search_parameters.time_limit.seconds = self.config.time_limit_seconds
-            search_parameters.log_search = False  # OR-Tools logging
+            
+            # Настройваме LNS времевия лимит прецизно (секунди и наносекунди)
+            lns_seconds = self.config.lns_time_limit_seconds
+            search_parameters.lns_time_limit.seconds = int(lns_seconds)
+            search_parameters.lns_time_limit.nanos = int((lns_seconds % 1) * 1e9)
+
+            search_parameters.log_search = self.config.log_search
+            search_parameters.use_full_propagation = self.config.use_full_propagation
             
             logger.info("🚀 Решавам CVRP модела с всички constraints...")
             
-            # 10. SOLVE
+            # 11. SOLVE
             solution = routing.SolveWithParameters(search_parameters)
             
             if solution:
                 logger.info("✅ OR-Tools намери решение!")
-                return self._extract_solution(manager, routing, solution)
+                return self._extract_solution(manager, routing, solution, data)
             else:
                 status = routing.status()
                 logger.error(f"❌ OR-Tools не намери решение! Статус: {status}")
@@ -543,14 +588,14 @@ class ORToolsSolver:
         
         logger.info(f"✅ Добавени ограничения за {len(self.customers)} клиента с center bus приоритет")
     
-    def _extract_solution(self, manager, routing, solution) -> CVRPSolution:
+    def _extract_solution(self, manager, routing, solution, data) -> CVRPSolution:
         """Извлича решението от OR-Tools с поддръжка за множество депа"""
         routes = []
         total_distance = 0
         total_time = 0
         
-        num_vehicles = routing.vehicles()
         num_depots = len(self.unique_depots)
+        all_serviced_customer_indices = set()
         
         for vehicle_id in range(routing.vehicles()):
             route_customers = []
@@ -560,17 +605,16 @@ class ORToolsSolver:
             # Определяме кое е депото за този vehicle според data model
             vehicle_config = self._get_vehicle_config_for_id(vehicle_id)
             
-            # ВАЖНО: Специален случай за CENTER_BUS - винаги използва center_location
-            if vehicle_config.vehicle_type.value == 'center_bus':
-                from config import get_config
-                depot_location = get_config().locations.center_location
-                logger.info(f"🎯 Автобус {vehicle_id} е CENTER_BUS - използвам center_location: {depot_location}")
-            elif vehicle_config.start_location:
-                depot_index = self.unique_depots.index(vehicle_config.start_location)
-                depot_location = self.unique_depots[depot_index]
-            else:
-                depot_index = 0  # Основното депо
-                depot_location = self.unique_depots[depot_index]
+            # Вземаме депото директно от решението на OR-Tools
+            start_node = manager.IndexToNode(routing.Start(vehicle_id))
+            
+            if start_node >= num_depots:
+                # Това не би трябвало да се случва, тъй като всички маршрути трябва да започват от депо.
+                # Но за всеки случай, логваме и пропускаме този автобус.
+                logger.error(f"❌ Грешка: Автобус {vehicle_id} започва от клиент (node {start_node}), а не от депо. Маршрутът се игнорира.")
+                continue
+
+            depot_location = self.unique_depots[start_node]
             
             index = routing.Start(vehicle_id)
             while not routing.IsEnd(index):
@@ -582,6 +626,7 @@ class ORToolsSolver:
                     if 0 <= customer_index < len(self.customers):
                         customer = self.customers[customer_index]
                         route_customers.append(customer)
+                        all_serviced_customer_indices.add(customer_index)
                 
                 previous_index = index
                 index = solution.Value(routing.NextVar(index))
@@ -629,8 +674,23 @@ class ORToolsSolver:
                 total_distance += route_distance
                 total_time += route_time + total_service_time
         
+        # Намираме пропуснатите клиенти
+        all_customer_indices = set(range(len(self.customers)))
+        dropped_customer_indices = all_customer_indices - all_serviced_customer_indices
+        dropped_customers = [self.customers[i] for i in dropped_customer_indices]
+        
+        if dropped_customers:
+            logger.warning(f"⚠️ OR-Tools пропусна {len(dropped_customers)} клиента, за да намери решение:")
+            # Сортираме по обем за по-ясно представяне
+            dropped_customers.sort(key=lambda c: c.volume, reverse=True)
+            for cust in dropped_customers[:10]: # показваме първите 10
+                logger.warning(f"   - Пропуснат: {cust.name} (обем: {cust.volume:.1f} ст.)")
+            if len(dropped_customers) > 10:
+                logger.warning(f"   - ... и още {len(dropped_customers) - 10}")
+        
         cvrp_solution = CVRPSolution(
             routes=routes,
+            dropped_customers=dropped_customers,
             total_distance_km=total_distance / 1000,
             total_time_minutes=total_time / 60,
             total_vehicles_used=len(routes),
@@ -640,6 +700,8 @@ class ORToolsSolver:
         
         # Проверка на общата валидност на решението
         invalid_routes = [r for r in routes if not r.is_feasible]
+        is_solution_feasible = not invalid_routes and not dropped_customers
+
         if invalid_routes:
             cvrp_solution.is_feasible = False
             logger.error(f"❌ {len(invalid_routes)} от {len(routes)} маршрута нарушават ограниченията!")
@@ -648,8 +710,11 @@ class ORToolsSolver:
                 logger.error(f"   Автобус {route.vehicle_id} ({vehicle_config.vehicle_type.value}): "
                            f"{route.total_distance_km:.1f}км/{vehicle_config.max_distance_km}км, "
                            f"{route.total_volume:.1f}ст/{vehicle_config.capacity}ст")
+        elif dropped_customers:
+            cvrp_solution.is_feasible = False
+            logger.warning("🟡 Решението е валидно, но някои клиенти са пропуснати.")
         else:
-            logger.info("✅ Всички маршрути съответстват на ограниченията")
+            logger.info("✅ Всички маршрути съответстват на ограниченията и всички клиенти са обслужени!")
         
         # Финална информация в прогрес tracker-а  
         if hasattr(self, 'progress_tracker'):
@@ -791,6 +856,7 @@ class ORToolsSolver:
         
         return CVRPSolution(
             routes=routes,
+            dropped_customers=[],
             total_distance_km=sum(r.total_distance_km for r in routes),
             total_time_minutes=sum(r.total_time_minutes for r in routes),
             total_vehicles_used=len(routes),
@@ -864,7 +930,7 @@ class CVRPSolver:
         customers = allocation.vehicle_customers
         if not customers:
             logger.warning("Няма клиенти за оптимизация")
-            return CVRPSolution([], 0, 0, 0, 0, True)
+            return CVRPSolution([], [], 0, 0, 0, 0, True)
 
         # Получаване на включените превозни средства
         from config import config_manager
