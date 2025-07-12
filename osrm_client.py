@@ -377,7 +377,7 @@ class OSRMClient:
     def _build_matrix_via_small_batches(self, locations: List[Tuple[float, float]]) -> DistanceMatrix:
         """Fallback метод за малки batch заявки когато пълната матрица не работи"""
         n = len(locations)
-        batch_size = 30  # Намален размер до 30 координати за стабилност
+        batch_size = 50  # Намален размер до 30 координати за стабилност
         
         logger.info(f"🔧 Започвам малки batch заявки: {n} локации с batches от {batch_size}")
         

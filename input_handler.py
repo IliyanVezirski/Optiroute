@@ -19,7 +19,7 @@ class Customer:
     """Клас за представяне на клиент"""
     id: str
     name: str
-    coordinates: Tuple[float, float]  # (latitude, longitude)
+    coordinates: Optional[Tuple[float, float]]  # (latitude, longitude)
     volume: float
     original_gps_data: str
 
@@ -133,7 +133,8 @@ class InputHandler:
                 customers.append(customer)
                 
             except Exception as e:
-                logger.error(f"Грешка при обработка на ред {index + 1}: {e}")
+                # Променяме съобщението, за да работи с всякакъв тип индекс (не само числа)
+                logger.error(f"Грешка при обработка на ред с индекс '{index}': {e}")
                 continue
         
         return customers

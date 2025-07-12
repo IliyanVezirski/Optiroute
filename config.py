@@ -4,9 +4,22 @@
 """
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from tkinter import TRUE
 from typing import Dict, Any, Optional, List, Tuple
 from enum import Enum
+
+
+# --- Path Configuration ---
+# Определяне на основната директория на проекта.
+# __file__ е пътят до текущия файл (config.py).
+# os.path.dirname(__file__) е директорията, в която се намира config.py.
+# Това прави всички пътища независими от директорията, от която се стартира скриптът.
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+
+# Helper функция за създаване на абсолютни пътища
+def _abs_path(relative_path: str) -> str:
+    return os.path.join(PROJECT_ROOT, relative_path)
 
 
 class VehicleType(Enum):
@@ -36,7 +49,7 @@ class VehicleConfig:
 class LocationConfig:
     """GPS координати за важни локации в системата."""
     depot_location: Tuple[float, float] = (42.695785029219415, 23.23165887245312)  # Главно депо, от което тръгват повечето превозни средства.
-    center_location: Tuple[float, float] = (42.69773576871825, 23.321588606946342) # Специална локация "Център", използвана за CENTER_BUS.
+    center_location: Tuple[float, float] = (42.69735652560932, 23.323809998750914) # Специална локация "Център", използвана за CENTER_BUS.
 
 
 @dataclass
@@ -64,7 +77,7 @@ class OSRMConfig:
 @dataclass
 class InputConfig:
     """Конфигурации за обработка на входните данни от Excel файл."""
-    excel_file_path: str = "data/input.xlsx" # Път до входния Excel файл.
+    excel_file_path: str = _abs_path("data/input.xlsx") # Път до входния Excel файл.
     gps_column: str = "GpsData"         # Име на колоната с GPS координатите на клиентите.
     client_id_column: str = "Клиент"      # Име на колоната с ID на клиента.
     client_name_column: str = "Име Клиент" # Име на колоната с името на клиента.
@@ -78,83 +91,64 @@ class WarehouseConfig:
     """Конфигурации за логиката на склада, който обработва част от заявките предварително."""
     enable_warehouse: bool = True  # Дали да се използва логиката за предварително отделяне на заявки за склада.
     sort_by_volume: bool = True  # Дали заявките да се сортират по обем преди обработка.
-    move_largest_to_warehouse: bool = False # Ако е True, най-големите заявки се отделят за склада. Ако е False, всички отиват към solver-а.
+    move_largest_to_warehouse: bool = True # Ако е True, най-големите заявки се отделят за склада. Ако е False, всички отиват към solver-а.
     warehouse_capacity_multiplier: float = 1.2 # Множител, който определя капацитета на склада спрямо общия капацитет на бусовете.
-    large_request_threshold: float = 0.8 # Праг (като процент от капацитета на най-големия бус), над който една заявка се счита за "голяма".
+    large_request_threshold: float = 0.3 # Праг (като процент от капацитета на най-големия бус), над който една заявка се счита за "голяма".
 
 
 @dataclass
 class CVRPConfig:
-    """Конфигурации за CVRP (Capacitated Vehicle Routing Problem) алгоритъма на OR-Tools."""
+    """
+    Конфигурация за CVRP (Capacitated Vehicle Routing Problem) решателя на OR-Tools.
+    Тези настройки контролират всеки аспект на процеса на оптимизация.
+    """
     algorithm: str = "or_tools"  # Основен алгоритъм. В момента се поддържа само "or_tools".
-    
-    # --- OR-Tools Search Parameters ---
-    time_limit_seconds: int = 300 # Максимално време в секунди, което solver-ът има за намиране на решение.
 
-    # Стратегия за намиране на първоначално ("първо") решение. Доброто начално решение
-    # често води до по-добър финален резултат, но може да отнеме повече време.
-    #   - "PATH_CHEAPEST_ARC": Най-бързата. Просто свързва най-близките точки една по една. Подходяща за бързи тестове.
-    #   - "AUTOMATIC": Solver-ът сам избира най-подходящата стратегия. Балансиран избор.
-    #   - "SAVINGS": Класически, по-бавен метод, който често дава добри резултати.
-    #   - "CHRISTOFIDES": Най-изчислително скъпа, но много качествена стратегия, особено за сложни проблеми.
-    first_solution_strategy: str = "CHRISTOFIDES"
+    # --- Основни параметри на търсенето ---
+    time_limit_seconds: int = 60
+    # Описание: Максимално време в секунди, което solver-ът има за намиране на решение.
 
-    # Метаевристика за локално търсене, която подобрява намереното решение. Помага на solver-а
-    # да избегне "засядане" в локални оптимуми и да намери по-глобално добро решение.
-    #   - "GUIDED_LOCAL_SEARCH": Мощна и препоръчителна стратегия за VRP проблеми.
-    #   - "SIMULATED_ANNEALING": Класическа алтернатива.
-    #   - "TABU_SEARCH": Друга класическа алтернатива.
+    first_solution_strategy: str = "PATH_CHEAPEST_ARC"
+    # Описание: Стратегия за намиране на първоначално решение. SAVINGS е по-бърза от AUTOMATIC.
+    # Стойности: "AUTOMATIC", "PATH_CHEAPEST_ARC", "SAVINGS", "SWEEP", и др.
+
     local_search_metaheuristic: str = "GUIDED_LOCAL_SEARCH"
+    # Описание: SIMULATED_ANNEALING е по-добра за избягване на локални оптимуми.
+    # Стойности: "AUTOMATIC", "GUIDED_LOCAL_SEARCH", "SIMULATED_ANNEALING", "TABU_SEARCH".
     
-    # Използване на "пълна пропагация" на ограниченията. Това забавя всяка стъпка от търсенето, но може
-    # да "отреже" по-големи части от дървото на възможните решения, водейки до по-добри
-    # резултати при проблеми със сложни ограничения. Изисква повече памет.
-    use_full_propagation: bool = True
+    lns_time_limit_seconds: float = 0.1
+    # Описание: Много кратък микро-лимит принуждава solver-а да се движи бързо.
+    # Употреба: 0.1 секунди е достатъчно за една стъпка, но не позволява зависване.
 
-    # Времеви лимит (в секунди) за всяка отделна стъпка на локално търсене (Large Neighborhood Search).
-    # По-висока стойност (напр. 0.5 или 1.0) дава повече време на LNS да подобри решението на всяка стъпка,
-    # което може да подобри крайния резултат, но за сметка на общата скорост.
-    lns_time_limit_seconds: float = 0.5
+    log_search: bool = True
+    # Описание: Дали OR-Tools да извежда детайлен лог на процеса на търсене.
 
-    log_search: bool = True # Дали OR-Tools да извежда детайлен лог на процеса на търсене. Полезно за дебъгване.
+    # --- Логика за пропускане на клиенти ---
+    drop_penalty_uniform_high_value: int = 99999999999999999
+    # Описание: Висока "неустойка" за пропускане на клиент. Кара solver-а да пропуска
+    #           клиенти само в краен случай, ако е невъзможно да се вместят в ограниченията.
+
+    # --- Настройки за паралелна обработка ---
+    enable_parallel_solving: bool = True
+    # Описание: Дали да се стартират няколко solver-а паралелно с различни стратегии.
     
-    # Множител за "наказание" при преминаване между различни географски сектори (дефинирани около депото).
-    # Стойност 1.0 на практика изключва тази функционалност. Стойности > 1.0 карат solver-а да
-    # групира клиентите по сектори, което може да ускори търсенето, но с риск за неоптимални маршрути.
-    sector_penalty_multiplier: float = 1.5
+    # --- Режим на solver-а ---
+    use_simple_solver: bool = False
+    # Описание: Дали да се използва опростеният solver, който точно следва OR-Tools примера.
+    # True = само capacity constraints, False = всички ограничения (distance, time, stops)
     
-    # --- Dropped Customers (Disjunctions) Settings ---
-    # Логика, по която solver-ът решава кои клиенти да пропусне, ако е невъзможно да обслужи всички.
-    #   - "PRIORITIZE_LARGEST": Приоритет е да се обслужат клиентите с НАЙ-ГОЛЕМИ заявки. По-висока "неустойка" за пропускане на голяма заявка.
-    #   - "PRIORITIZE_SMALLEST": Приоритет е да се обслужат клиентите с НАЙ-МАЛКИ заявки. По-висока "неустойка" за пропускане на малка заявка.
-    #   - "MINIMIZE_DROPPED_COUNT": Основен приоритет е да се обслужи МАКСИМАЛЕН БРОЙ клиенти, независимо от обема им. Всички клиенти имат еднакво висока неустойка.
-    drop_penalty_logic: str = "MINIMIZE_DROPPED_COUNT"
-    
-    # Множител, използван само при drop_penalty_logic = "PRIORITIZE_LARGEST".
-    # По-висока стойност означава по-голям стимул за solver-а да не пропуска големи заявки.
-    # Неустойката се изчислява като (обем * множител).
-    drop_penalty_volume_multiplier: int = 10000
-    
-    # Скалар, използван само при drop_penalty_logic = "PRIORITIZE_SMALLEST".
-    # По-висока стойност означава по-голяма защита за малките заявки от пропускане.
-    # Неустойката се изчислява като (скалар / обем).
-    drop_penalty_inverse_volume_scaler: int = 100000
-    
-    # Фиксирана стойност, използвана само при drop_penalty_logic = "MINIMIZE_DROPPED_COUNT".
-    # Задава много висока, еднаква неустойка за пропускането на който и да е клиент.
-    drop_penalty_uniform_high_value: int = 9999999
-    
-    # --- Deprecated/Legacy Algorithm Settings ---
-    max_iterations: int = 1000  # Максимален брой итерации за стари алгоритми (генетичен, и др.)
-    parallel_processing: bool = True # Дали да се използва паралелна обработка (ако алгоритъмът го поддържа).
-    random_seed: Optional[int] = None # Seed за генератора на случайни числа за възпроизводимост на резултатите.
-    
-    # Настройки за генетичен алгоритъм (запазени за съвместимост, не се използват активно)
-    population_size: int = 100
-    mutation_rate: float = 0.1
-    crossover_rate: float = 0.8
-    elite_size: int = 20
-    improvement_threshold: int = 50
+    num_workers: int = 7
+    # Описание: Брой паралелни процеси. -1 означава да се използват всички ядра без едно.
+
+    parallel_first_solution_strategies: List[str] = field(default_factory=lambda: [
+        "AUTOMATIC", "PARALLEL_CHEAPEST_INSERTION", "SAVINGS", "PATH_CHEAPEST_ARC", "GLOBAL_CHEAPEST_ARC","PATH_CHEAPEST_ARC","BEST_INSERTION"
+    ])
+    # Описание: Списък с "First Solution" стратегии, които да се състезават в паралелен режим.
+
+    parallel_local_search_metaheuristics: List[str] = field(default_factory=lambda: [
+        "AUTOMATIC", "GUIDED_LOCAL_SEARCH", "GUIDED_LOCAL_SEARCH", "TABU_SEARCH", "GUIDED_LOCAL_SEARCH", "GUIDED_LOCAL_SEARCH","GUIDED_LOCAL_SEARCH"
+    ])
+    # Описание: Списък с "Local Search" метаевристики, които да се състезават в паралелен режим.
 
 
 @dataclass
@@ -162,20 +156,20 @@ class OutputConfig:
     """Конфигурации за генериране на изходни файлове (карти, Excel отчети, графики)."""
     # Интерактивна карта
     enable_interactive_map: bool = True # Дали да се генерира HTML файл с интерактивна карта на маршрутите.
-    map_output_file: str = "output/interactive_map.html" # Път и име на файла за картата.
+    map_output_file: str = _abs_path("output/interactive_map.html") # Път и име на файла за картата.
     map_zoom_level: int = 12 # Начално приближение на картата.
     show_route_colors: bool = True # Дали различните маршрути да се оцветяват в различни цветове.
     show_vehicle_info: bool = True # Дали да се показва информация за превозното средство при клик на маршрут.
     
     # Excel файлове
-    excel_output_dir: str = "output/excel" # Директория за запис на Excel отчетите.
+    excel_output_dir: str = _abs_path("output/excel") # Директория за запис на Excel отчетите.
     warehouse_excel_file: str = "warehouse_orders.xlsx" # Име на файла с необслужените клиенти (за склада).
     routes_excel_file: str = "vehicle_routes.xlsx" # Име на файла с детайли за всеки маршрут.
     efficiency_excel_file: str = "efficiency_report.xlsx" # Име на файла с отчет за ефективността.
     
     # Графики и анализи
     enable_charts: bool = True # Дали да се генерират PNG файлове с графики.
-    charts_output_dir: str = "output/charts" # Директория за запис на графиките.
+    charts_output_dir: str = _abs_path("output/charts") # Директория за запис на графиките.
     efficiency_chart_file: str = "efficiency_analysis.png" # Графика с анализ на ефективността.
     route_comparison_file: str = "route_comparison.png" # Графика, сравняваща маршрутите.
     volume_distribution_file: str = "volume_distribution.png" # Графика с разпределението на обемите.
@@ -191,7 +185,7 @@ class OutputConfig:
 class LoggingConfig:
     """Конфигурации за системата за логиране."""
     log_level: str = "INFO"  # Ниво на логиране: DEBUG, INFO, WARNING, ERROR, CRITICAL.
-    log_file: str = "logs/cvrp.log" # Път до лог файла.
+    log_file: str = _abs_path("logs/cvrp.log") # Път до лог файла.
     log_format: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s" # Формат на съобщенията в лога.
     enable_console_logging: bool = True # Дали да се печатат логове в конзолата.
     enable_file_logging: bool = True # Дали да се записват логове във файл.
@@ -203,7 +197,7 @@ class LoggingConfig:
 class CacheConfig:
     """Конфигурации за системата за кеширане."""
     enable_cache: bool = True # Дали кеширането е активно.
-    cache_dir: str = "cache" # Директория, в която се съхраняват кеш файловете.
+    cache_dir: str = _abs_path("cache") # Директория, в която се съхраняват кеш файловете.
     osrm_cache_file: str = "osrm_matrix_cache.json" # Файл за кеширане на OSRM матриците с разстояния.
     routes_cache_file: str = "routes_cache.json" # Файл за кеширане на готови решения.
     cache_expiry_hours: int = 24 # Време в часове, след което кешът се счита за невалиден.
@@ -215,7 +209,7 @@ class PerformanceConfig:
     """Конфигурации, свързани с производителността на приложението."""
     max_concurrent_requests: int = 10 # Максимален брой едновременни заявки (напр. към OSRM).
     chunk_processing_delay: float = 0.1  # Време за изчакване в секунди между обработката на отделни "chunks".
-    memory_limit_mb: int = 1024 # Ограничение на паметта (информативно, не се налага стриктно).
+    memory_limit_mb: int = 2048 # Ограничение на паметта (информативно, не се налага стриктно).
     enable_multiprocessing: bool = True # Дали да се използва multiprocessing за ускоряване на изчисления.
     max_workers: int = 4 # Максимален брой паралелни процеси/нишки.
 
@@ -224,16 +218,16 @@ class PerformanceConfig:
 class MainConfig:
     """Главна конфигурация, която обединява всички останали модулни конфигурации."""
     # Модулни конфигурации
-    locations: LocationConfig = LocationConfig()
+    locations: LocationConfig = field(default_factory=LocationConfig)
     vehicles: Optional[List[VehicleConfig]] = None
-    osrm: OSRMConfig = OSRMConfig()
-    input: InputConfig = InputConfig()
-    warehouse: WarehouseConfig = WarehouseConfig()
-    cvrp: CVRPConfig = CVRPConfig()
-    output: OutputConfig = OutputConfig()
-    logging: LoggingConfig = LoggingConfig()
-    cache: CacheConfig = CacheConfig()
-    performance: PerformanceConfig = PerformanceConfig()
+    osrm: OSRMConfig = field(default_factory=OSRMConfig)
+    input: InputConfig = field(default_factory=InputConfig)
+    warehouse: WarehouseConfig = field(default_factory=WarehouseConfig)
+    cvrp: CVRPConfig = field(default_factory=CVRPConfig)
+    output: OutputConfig = field(default_factory=OutputConfig)
+    logging: LoggingConfig = field(default_factory=LoggingConfig)
+    cache: CacheConfig = field(default_factory=CacheConfig)
+    performance: PerformanceConfig = field(default_factory=PerformanceConfig)
     
     # Глобални настройки на приложението
     debug_mode: bool = False # Включва/изключва дебъг режим с по-детайлни логове.
@@ -247,40 +241,47 @@ class MainConfig:
     
     def _create_default_vehicles(self) -> List[VehicleConfig]:
         """Създава стандартен set от превозни средства, ако не е дефиниран друг."""
+        # --- Примерни GPS координати за различни депа ---
+        depot_main = self.locations.depot_location
+        depot_center = self.locations.center_location
+
         return [
-            # 1. Вътрешни бусове - 4 бр, 360 ст, 60км ограничение
+            # 1. Вътрешни бусове - 4 бр, 360 ст.
+            # Ограниченията за разстояние и брой клиенти са премахнати, за да се разчита
+            # само на твърдите, реални лимити - ВРЕМЕ и ОБЕМ.
             VehicleConfig(
                 vehicle_type=VehicleType.INTERNAL_BUS,
                 capacity=360,
                 count=4,
-                max_distance_km=60,
+                max_distance_km=80, # Премахнато
                 max_time_hours=8,
-                service_time_minutes=15,
+                service_time_minutes=5,
                 enabled=True,
-                max_customers_per_route=40
+                max_customers_per_route=45
+
             ),
-            # 2. Център бус - 1 бр, 250 ст, стартира от център
+            # 2. Център бус - 1 бр.
             VehicleConfig(
                 vehicle_type=VehicleType.CENTER_BUS,
                 capacity=250,
                 count=1,
-                max_distance_km=40,
-                max_time_hours=8,
-                service_time_minutes=15,
+                max_distance_km=50, # Премахнато
+                max_time_hours=9,
+                service_time_minutes=8,
                 enabled=True,
-                start_location=self.locations.center_location,
-                max_customers_per_route=40
+                max_customers_per_route=45,
+                start_location= depot_main # Тръгва от центъра
             ),
-            # 3. Външни бусове - 3 бр, 360 ст, 150км ограничение
+            # 3. Външни бусове - 3 бр, 360 ст.
             VehicleConfig(
                 vehicle_type=VehicleType.EXTERNAL_BUS,
                 capacity=360,
                 count=3,
-                max_distance_km=150,
-                max_time_hours=10,
-                service_time_minutes=10,
+                max_distance_km=180, # Премахнато
+                max_time_hours=8,
+                service_time_minutes=5, # КОРИГИРАНО
                 enabled=True,
-                max_customers_per_route=40
+                max_customers_per_route=40,
             )
         ]
 
@@ -289,7 +290,7 @@ class ConfigManager:
     """Мениджър за зареждане и записване на конфигурации"""
     
     def __init__(self, config_file: str = "config.json"):
-        self.config_file = config_file
+        self.config_file = _abs_path(config_file)
         self.config = MainConfig()
     
     def load_config(self, config_dict: Optional[Dict[str, Any]] = None) -> MainConfig:

@@ -23,7 +23,7 @@ except ImportError:
 
 from config import get_config, CVRPConfig, VehicleConfig, VehicleType
 from input_handler import Customer
-from osrm_client import DistanceMatrix, OSRMClient, get_distance_matrix_from_central_cache
+from osrm_client import DistanceMatrix
 from warehouse_manager import WarehouseAllocation
 
 logger = logging.getLogger(__name__)
@@ -129,12 +129,13 @@ class Route:
 class CVRPSolution:
     """Цялостно решение на CVRP проблема"""
     routes: List[Route]
-    dropped_customers: List[Customer]  # Клиенти, които solver-ът е избрал да пропусне
+    dropped_customers: List[Customer]
     total_distance_km: float
     total_time_minutes: float
     total_vehicles_used: int
-    fitness_score: float
+    fitness_score: float # Основната стойност, която solver-ът минимизира (разстояние)
     is_feasible: bool
+    total_served_volume: float = 0.0 # Обхът обслужен обем, използван за избор на "победител"
 
 
 class RouteBuilder:
@@ -237,7 +238,7 @@ class RouteBuilder:
 
 
 class ORToolsSolver:
-    """OR-Tools CVRP решател"""
+    """OR-Tools CVRP решател, опростена версия."""
     
     def __init__(self, config: CVRPConfig, vehicle_configs: List[VehicleConfig], 
                  customers: List[Customer], distance_matrix: DistanceMatrix, unique_depots: List[Tuple[float, float]]):
@@ -245,354 +246,206 @@ class ORToolsSolver:
         self.vehicle_configs = vehicle_configs
         self.customers = customers
         self.distance_matrix = distance_matrix
-        self.depot = 0  # депото е винаги индекс 0
-        self.progress_tracker = ORToolsProgressTracker(
-            time_limit_seconds=config.time_limit_seconds,
-            num_customers=len(customers)
-        )
         self.unique_depots = unique_depots
-    
-    def _get_angle_to_depot(self, lat, lon):
-        """Изчислява ъгъла между точка и депото спрямо север"""
-        depot_lat, depot_lon = self.distance_matrix.locations[0]
-        dx = lon - depot_lon
-        dy = lat - depot_lat
-        angle = math.degrees(math.atan2(dx, dy))
-        # Нормализираме до 0-360
-        return (angle + 360) % 360
-    
-    def _are_points_in_same_sector(self, from_node, to_node):
-        """Проверява дали две точки са в един и същ сектор спрямо депото"""
-        if from_node == 0 or to_node == 0:  # ако една от точките е депо
-            return True
-            
-        from_lat, from_lon = self.distance_matrix.locations[from_node]
-        to_lat, to_lon = self.distance_matrix.locations[to_node]
-        
-        from_angle = self._get_angle_to_depot(from_lat, from_lon)
-        to_angle = self._get_angle_to_depot(to_lat, to_lon)
-        
-        # Дефинираме сектори от по 45 градуса
-        SECTOR_SIZE = 45
-        from_sector = int(from_angle / SECTOR_SIZE)
-        to_sector = int(to_angle / SECTOR_SIZE)
-        
-        # Точките са в един сектор или съседни сектори
-        return abs(from_sector - to_sector) <= 1 or abs(from_sector - to_sector) == 7
-    
-    def _distance_callback_wrapper(self, manager):
-        """Wrapper за distance callback функцията"""
-        def distance_callback(from_index, to_index):
-            from_node = manager.IndexToNode(from_index)
-            to_node = manager.IndexToNode(to_index)
-            
-            base_distance = self.distance_matrix.distances[from_node][to_node]
-            
-            # Ако точките не са в един и същ или съседен сектор,
-            # добавяме голяма penalty
-            if not self._are_points_in_same_sector(from_node, to_node):
-                # Увеличаваме разстоянието значително
-                return int(base_distance * self.config.sector_penalty_multiplier)
-            
-            # За точки в един и същ сектор, използваме реалното разстояние
-            return int(base_distance)
-        return distance_callback
-        
+
     def solve(self) -> CVRPSolution:
-        """Решава CVRP с OR-Tools и multiple depots поддръжка"""
+        """
+        Решава CVRP проблема по класическия начин, като минимизира разстоянието
+        и спазва 4-те твърди ограничения: обем, разстояние, брой клиенти и време.
+        """
         if not ORTOOLS_AVAILABLE:
             logger.error("❌ OR-Tools не е инсталиран")
-            return CVRPSolution([], [], 0, 0, 0, 0, False)
+            return self._create_empty_solution()
         
         try:
-            # 1. Създаване на data model
+            # 1. Създаване на data model и мениджър
             data = self._create_data_model()
-            
-            logger.info("📊 ВХОДНИ ДАННИ:")
-            logger.info(f"   Customers: {len(self.customers)}")
-            logger.info(f"   Total locations: {len(data['distance_matrix'])}")
-            logger.info(f"   Vehicles: {data['num_vehicles']}")
-            logger.info(f"   Депа: {len(self.unique_depots)}")
-            
-            # 2. Създаване на Index Manager с multiple starts/ends
             manager = pywrapcp.RoutingIndexManager(
-                len(data['distance_matrix']),
-                data['num_vehicles'],
-                data['vehicle_starts'],  # Различни start депа
-                data['vehicle_ends']     # Различни end депа
+                len(data['distance_matrix']), data['num_vehicles'], data['vehicle_starts'], data['vehicle_ends']
             )
-            
-            # 3. Създаване на Routing Model
             routing = pywrapcp.RoutingModel(manager)
+
+            # 2. ЦЕНА НА МАРШРУТА = РАЗСТОЯНИЕ
+            def distance_callback(from_index, to_index):
+                from_node = manager.IndexToNode(from_index)
+                to_node = manager.IndexToNode(to_index)
+                # КРИТИЧЕН ФИКС: OR-Tools очаква ЦЯЛО ЧИСЛО.
+                return int(self.distance_matrix.distances[from_node][to_node])
             
-            # 4. Distance callback с penalty за сектори
-            logger.info("🚚 Активирам penalty за сектори, за да групирам маршрутите географски.")
-            sector_callback = self._distance_callback_wrapper(manager)
-            transit_callback_index = routing.RegisterTransitCallback(sector_callback)
+            transit_callback_index = routing.RegisterTransitCallback(distance_callback)
             routing.SetArcCostEvaluatorOfAllVehicles(transit_callback_index)
-            
-            # 5. ПРИОРИТИЗАЦИЯ на центъра чрез fixed costs
-            vehicle_types = data['vehicle_types']
-            for vehicle_id, vehicle_type in enumerate(vehicle_types):
-                if vehicle_type == VehicleType.CENTER_BUS:
-                    routing.SetFixedCostOfVehicle(0, vehicle_id)  # най-евтин
-                elif vehicle_type == VehicleType.INTERNAL_BUS:
-                    routing.SetFixedCostOfVehicle(1000, vehicle_id)  # среден приоритет
-                else:  # EXTERNAL_BUS
-                    routing.SetFixedCostOfVehicle(2000, vehicle_id)  # най-скъп
-            
-            logger.info("✅ Задени приоритетни costs: Center=0, Internal=1000, External=2000")
-            
-            # 6. CAPACITY CONSTRAINT
+
+            # 3. ОГРАНИЧЕНИЯ (DIMENSIONS) - ВСИЧКИ СА АКТИВНИ
+            # Обем
             def demand_callback(from_index):
                 from_node = manager.IndexToNode(from_index)
-                return data['demands'][from_node]
-            
+                return int(data['demands'][from_node]) # int() за сигурност
             demand_callback_index = routing.RegisterUnaryTransitCallback(demand_callback)
             routing.AddDimensionWithVehicleCapacity(
-                demand_callback_index,
-                10,  # null capacity slack
-                data['vehicle_capacities'],  # vehicle maximum capacities
-                True,  # start cumul to zero
-                "Capacity",
+                demand_callback_index, 0, data['vehicle_capacities'], True, "Capacity"
             )
 
-            # 6a. MAX CUSTOMERS PER ROUTE (STOPS) CONSTRAINT
-            def stop_callback(from_index):
-                from_node = manager.IndexToNode(from_index)
-                # Depot не се брои като стоп
-                return 0 if from_node == 0 else 1
-            stop_callback_index = routing.RegisterUnaryTransitCallback(stop_callback)
-            # Създаваме списък с лимити за всеки автобус
-            vehicle_max_stops = []
-            for v in self.vehicle_configs:
-                if v.enabled:
-                    max_stops = v.max_customers_per_route if v.max_customers_per_route is not None else 99999
-                    for _ in range(v.count):
-                        vehicle_max_stops.append(max_stops)
+            # Разстояние - АКТИВИРАНО
             routing.AddDimensionWithVehicleCapacity(
-                stop_callback_index,
-                10,  # slack
-                vehicle_max_stops,
-                True,  # start cumul to zero
-                "Stops",
+                transit_callback_index, 0, data['vehicle_max_distances'], True, "Distance"
             )
-            
-            # 7. DISTANCE CONSTRAINTS
-            if any(d < 999999999 for d in data['vehicle_max_distances']):
-                logger.info("✅ Distance constraints ВКЛЮЧЕНИ")
-                dimension_name = "Distance"
-                routing.AddDimensionWithVehicleCapacity(
-                    transit_callback_index,
-                    0,  # no slack for distance
-                    data['vehicle_max_distances'],  # vehicle maximum distances in meters
-                    True,  # start cumul to zero
-                    dimension_name
-                )
-                distance_dimension = routing.GetDimensionOrDie(dimension_name)
-                # Penalize long routes to guide the solver. The hard limit is set by the dimension itself.
-                distance_dimension.SetGlobalSpanCostCoefficient(100)
 
-                logger.info(f"   Зададени лимити (км): "
-                            f"{[f'{d/1000:.0f}' if d < 999999999 else 'N/A' for d in data['vehicle_max_distances']]}")
-            
-            # 8. VEHICLE TYPE CONSTRAINTS
-            self._add_vehicle_type_constraints(routing, manager, data)
-            
-            # 9. ALLOW DROPPING NODES (DISJUNCTIONS) WITH PENALTIES
-            logger.info(f"✅ Активирам пропускане на клиенти с penalty (логика: {self.config.drop_penalty_logic})")
-            num_depots = len(self.unique_depots)
-            
-            # Референтното депо за измерване на разстояние е винаги на индекс 0
-            main_depot_node_index = 0
+            # Брой клиенти (спирки) - АКТИВИРАНО
+            def stop_callback(from_index):
+                return 1 if manager.IndexToNode(from_index) not in data['depot_indices'] else 0
+            stop_callback_index = routing.RegisterUnaryTransitCallback(stop_callback)
+            routing.AddDimensionWithVehicleCapacity(
+                stop_callback_index, 0, data['vehicle_max_stops'], True, "Stops"
+            )
 
-            for node_index in range(num_depots, len(data['distance_matrix'])):
-                customer_index = node_index - num_depots
+            # Време - АКТИВИРАНО
+            def time_callback(from_index, to_index):
+                from_node = manager.IndexToNode(from_index)
+                to_node = manager.IndexToNode(to_index)
+                travel_time = self.distance_matrix.durations[from_node][to_node]
+                service_time = data['service_times'][from_node]
+                return int(service_time + travel_time) # КРИТИЧЕН ФИКС: Връщаме int
+            
+            time_callback_index = routing.RegisterTransitCallback(time_callback)
+            routing.AddDimensionWithVehicleCapacity(
+                time_callback_index, 0, data['vehicle_max_times'], False, "Time"
+            )
+
+            # 4. ЛОГИКА ЗА ПРОПУСКАНЕ НА КЛИЕНТИ - с ДИНАМИЧНА глоба по твоята формула
+            logger.info("Използва се ДИНАМИЧНА глоба за пропускане на клиенти, базирана на разстояние и обем.")
+            
+            # Тежести за формулата
+            distance_penalty_weight = 5000
+            volume_penalty_weight = 50000
+
+            for node_idx in range(len(self.unique_depots), len(data['distance_matrix'])):
+                customer_index = node_idx - len(self.unique_depots)
                 customer = self.customers[customer_index]
-                
-                # Вземаме разстоянието от основното депо до клиента
-                distance_m = data['distance_matrix'][main_depot_node_index][node_index]
-                distance_km = (distance_m / 1000) + 0.1 # епсилон против делене на 0
 
-                final_penalty = 0
-                if self.config.drop_penalty_logic == "MINIMIZE_DROPPED_COUNT":
-                    # УНИФОРМНА ЛОГИКА: Всички клиенти са еднакво "скъпи" за пропускане
-                    final_penalty = self.config.drop_penalty_uniform_high_value
+                # Разстояние от главното депо (индекс 0) до клиента в метри
+                distance_from_depot_m = self.distance_matrix.distances[0][node_idx]
                 
-                elif self.config.drop_penalty_logic == "PRIORITIZE_SMALLEST":
-                    # ОБРАТНА ЛОГИКА: по-висока неустойка за МАЛКИ заявки
-                    volume = customer.volume + 0.1 # епсилон
-                    penalty_component = self.config.drop_penalty_inverse_volume_scaler / volume
-                    final_penalty = int((penalty_component / distance_km) * 100) + 100
-
-                else: # "PRIORITIZE_LARGEST" (поведение по подразбиране)
-                    # СТАНДАРТНА ЛОГИКА: по-висока неустойка за ГОЛЕМИ заявки
-                    penalty_component = customer.volume * self.config.drop_penalty_volume_multiplier
-                    final_penalty = int((penalty_component / distance_km) * 100) + 100
+                # Обем на клиента
+                customer_volume = customer.volume
                 
-                routing.AddDisjunction([manager.NodeToIndex(node_index)], final_penalty)
+                # Изчисляваме динамичната глоба по формулата:
+                # (разстояние депо - клиент * 50000) + (обем клиент / 100 * 50000)
+                penalty = int(
+                    (distance_from_depot_m * distance_penalty_weight) + 
+                    (customer_volume / 100 * volume_penalty_weight)
+                )
 
-            # 10. SEARCH PARAMETERS
+                routing.AddDisjunction([manager.NodeToIndex(node_idx)], penalty)
+
+            # 5. ПАРАМЕТРИ НА ТЪРСЕНЕ (Стандартни)
+            logger.info("Използват се стандартни параметри за търсене.")
             search_parameters = pywrapcp.DefaultRoutingSearchParameters()
-            search_parameters.first_solution_strategy = getattr(
-                routing_enums_pb2.FirstSolutionStrategy, 
-                self.config.first_solution_strategy
+            search_parameters.first_solution_strategy = (
+                routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
             )
-            search_parameters.local_search_metaheuristic = getattr(
-                routing_enums_pb2.LocalSearchMetaheuristic,
-                self.config.local_search_metaheuristic
+            search_parameters.local_search_metaheuristic = (
+                routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
             )
             search_parameters.time_limit.seconds = self.config.time_limit_seconds
-            
-            # Настройваме LNS времевия лимит прецизно (секунди и наносекунди)
-            lns_seconds = self.config.lns_time_limit_seconds
-            search_parameters.lns_time_limit.seconds = int(lns_seconds)
-            search_parameters.lns_time_limit.nanos = int((lns_seconds % 1) * 1e9)
-
             search_parameters.log_search = self.config.log_search
-            search_parameters.use_full_propagation = self.config.use_full_propagation
-            
-            logger.info("🚀 Решавам CVRP модела с всички constraints...")
-            
-            # 11. SOLVE
+
+            # 6. РЕШАВАНЕ
+            logger.info(f"🚀 Стартирам решаване с пълни ограничения (времеви лимит: {self.config.time_limit_seconds}s)...")
             solution = routing.SolveWithParameters(search_parameters)
             
+            # 7. ОБРАБОТКА НА РЕШЕНИЕТО
             if solution:
-                logger.info("✅ OR-Tools намери решение!")
                 return self._extract_solution(manager, routing, solution, data)
             else:
-                status = routing.status()
-                logger.error(f"❌ OR-Tools не намери решение! Статус: {status}")
-                return self._create_backup_solution()
+                logger.error("❌ OR-Tools не намери решение!")
+                return self._create_empty_solution()
                 
         except Exception as e:
-            logger.error(f"❌ Грешка в OR-Tools solver: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
-            return self._create_backup_solution()
-    
+            logger.error(f"❌ Грешка в OR-Tools solver: {e}", exc_info=True)
+            return self._create_empty_solution()
+
     def _create_data_model(self):
-        """Създава data model за OR-Tools с поддръжка за множество депа"""
+        """
+        Изцяло пренаписана функция, за да се гарантира, че ЧЕТИРИТЕ твърди ограничения
+        (Обем, Разстояние, Брой клиенти, Време) се четат и прилагат СТРИКТНО
+        от конфигурационния файл, без грешки или своеволия.
+        """
+        logger.info("--- СЪЗДАВАНЕ НА DATA MODEL (СТРИКТЕН РЕЖИМ) ---")
         data = {}
+        data['distance_matrix'] = self.distance_matrix.distances
+        data['demands'] = [0] * len(self.unique_depots) + [int(c.volume * 100) for c in self.customers]
         
-        # Distance matrix остава същата - [депа] + [клиенти]
-        data['distance_matrix'] = []
-        for i in range(len(self.distance_matrix.distances)):
-            row = []
-            for j in range(len(self.distance_matrix.distances[i])):
-                # Конвертираме в метри и integer (OR-Tools изисква integer)
-                distance_meters = int(self.distance_matrix.distances[i][j])
-                row.append(distance_meters)
-            data['distance_matrix'].append(row)
+        base_service_time = next((v.service_time_minutes for v in self.vehicle_configs if v.enabled), 15) * 60
+        data['service_times'] = [0] * len(self.unique_depots) + [base_service_time] * len(self.customers)
         
-        # Demands - депата имат demand 0, клиентите имат техните volumes
-        num_depots = len(self.unique_depots)
-        data['demands'] = [0] * num_depots  # Депата имат 0 demand
-        for customer in self.customers:
-            data['demands'].append(int(customer.volume * 100))  # в стотинки
+        data['num_vehicles'] = sum(v.count for v in self.vehicle_configs if v.enabled)
+        logger.info(f"  - Общо превозни средства: {data['num_vehicles']}")
+        data['depot_indices'] = list(range(len(self.unique_depots)))
+
+        vehicle_capacities = []
+        vehicle_max_distances = []
+        vehicle_max_stops = []
+        vehicle_max_times = []
+        vehicle_starts = []
+        vehicle_ends = []
         
-        # Vehicle конфигурации
-        data['vehicle_capacities'] = []
-        data['vehicle_max_distances'] = []
-        data['vehicle_types'] = []
-        data['vehicle_starts'] = []  # Стартови депа за всеки автобус
-        data['vehicle_ends'] = []    # Крайни депа за всеки автобус
+        logger.info("  - Зареждане на твърди ограничения от конфигурацията...")
         
-        vehicle_idx = 0
-        for vehicle_config in self.vehicle_configs:
-            if vehicle_config.enabled:
-                # Намираме кой depot index отговаря на start_location на този vehicle
-                if vehicle_config.start_location:
-                    depot_index = self.unique_depots.index(vehicle_config.start_location)
-                else:
-                    # Намираме основното депо (не center_location)
-                    center_location = get_config().locations.center_location
-                    main_depot = None
-                    for depot in self.unique_depots:
-                        if depot != center_location:
-                            main_depot = depot
-                            break
-                    depot_index = self.unique_depots.index(main_depot) if main_depot else 0
-                
-                for _ in range(vehicle_config.count):
-                    # Capacity в стотинки
-                    capacity = int(vehicle_config.capacity * 100)
-                    data['vehicle_capacities'].append(capacity)
+        for v_config in self.vehicle_configs:
+            if v_config.enabled:
+                depot_index = self._get_depot_index_for_vehicle(v_config)
+                for _ in range(v_config.count):
+                    # 1. Обем (Capacity) - стриктно
+                    vehicle_capacities.append(int(v_config.capacity * 100))
                     
-                    # Max distance в метри
-                    max_dist = int(vehicle_config.max_distance_km * 1000) if vehicle_config.max_distance_km else 999999999
-                    data['vehicle_max_distances'].append(max_dist)
+                    # 2. Разстояние (Distance) - стриктно
+                    max_dist = int(v_config.max_distance_km * 1000) if v_config.max_distance_km else 999999999
+                    vehicle_max_distances.append(max_dist)
                     
-                    # Vehicle type за constraints
-                    data['vehicle_types'].append(vehicle_config.vehicle_type)
+                    # 3. Брой клиенти (Stops) - стриктно
+                    max_stops = v_config.max_customers_per_route if v_config.max_customers_per_route is not None else len(self.customers) + 1
+                    vehicle_max_stops.append(max_stops)
+
+                    # 4. Време (Time) - стриктно
+                    vehicle_max_times.append(int(v_config.max_time_hours * 3600))
                     
-                    # Start/end депа за този автобус
-                    data['vehicle_starts'].append(depot_index)
-                    data['vehicle_ends'].append(depot_index)  # Връща се в същото депо
-                    
-                    logger.debug(f"   🚛 Vehicle {vehicle_idx} ({vehicle_config.vehicle_type.value}): "
-                               f"depot_index={depot_index}, location={self.unique_depots[depot_index]}")
-                    vehicle_idx += 1
+                    vehicle_starts.append(depot_index)
+                    vehicle_ends.append(depot_index)
         
-        data['num_vehicles'] = len(data['vehicle_capacities'])
+        data['vehicle_capacities'] = vehicle_capacities
+        data['vehicle_max_distances'] = vehicle_max_distances
+        data['vehicle_max_stops'] = vehicle_max_stops
+        data['vehicle_max_times'] = vehicle_max_times
+        data['vehicle_starts'] = vehicle_starts
+        data['vehicle_ends'] = vehicle_ends
+        data['depot'] = 0 
         
-        logger.info(f"📋 MULTI-DEPOT DATA MODEL:")
-        logger.info(f"   Брой депа: {len(self.unique_depots)}")
-        logger.info(f"   Matrix size: {len(data['distance_matrix'])}x{len(data['distance_matrix'][0])}")
-        logger.info(f"   Demands: {data['demands'][:min(10, len(data['demands']))]}... (първи 10)")
-        logger.info(f"   Vehicle capacities: {data['vehicle_capacities']}")
-        logger.info(f"   Vehicle starts: {data['vehicle_starts']}")
-        logger.info(f"   Vehicle types: {[vt.value for vt in data['vehicle_types']]}")
-        
+        logger.info(f"  - Капацитети: {data['vehicle_capacities']}")
+        logger.info(f"  - Макс. разстояния (м): {data['vehicle_max_distances']}")
+        logger.info(f"  - Макс. спирки: {data['vehicle_max_stops']}")
+        logger.info(f"  - Макс. времена (сек): {data['vehicle_max_times']}")
+        logger.info("--- DATA MODEL СЪЗДАДЕН ---")
         return data
-    
-    def _add_vehicle_type_constraints(self, routing, manager, data):
-        """Добавя ограничения за типовете превозни средства според имената на клиентите"""
-        logger.info("🚛 Добавям ограничения за типове превозни средства с приоритет на center bus...")
-        
-        vehicle_types = data['vehicle_types']
-        
-        # Броим типове клиенти
-        center_count = sum(1 for c in self.customers if "Център" in c.name or "Center" in c.name.lower())
-        external_count = sum(1 for c in self.customers if "Външен" in c.name or "External" in c.name.lower())
-        internal_count = len(self.customers) - center_count - external_count
-        
-        logger.info(f"📊 Типове клиенти: Center={center_count}, External={external_count}, Internal={internal_count}")
-        
-        # Всички клиенти могат да се обслужват от всички автобуси, но с приоритет
-        # Center Bus има най-висок приоритет (поставяме го първо в списъка)
-        for customer_idx, customer in enumerate(self.customers):
-            node_index = customer_idx + 1  # +1 защото depot е 0
-            allowed_vehicles = []
-            
-            # ПРИОРИТИЗАЦИЯ: Center Bus > Internal Bus > External Bus
-            # 1. Първо добавяме Center Bus автобусите
-            for vehicle_id, vehicle_type in enumerate(vehicle_types):
-                if vehicle_type == VehicleType.CENTER_BUS:
-                    allowed_vehicles.append(vehicle_id)
-            
-            # 2. След това Internal Bus автобусите  
-            for vehicle_id, vehicle_type in enumerate(vehicle_types):
-                if vehicle_type == VehicleType.INTERNAL_BUS:
-                    allowed_vehicles.append(vehicle_id)
-            
-            # 3. Накрая External Bus автобусите
-            for vehicle_id, vehicle_type in enumerate(vehicle_types):
-                if vehicle_type == VehicleType.EXTERNAL_BUS:
-                    allowed_vehicles.append(vehicle_id)
-            
-            # Задаваме ограничението с приоритизирания списък
-            routing.SetAllowedVehiclesForIndex(allowed_vehicles, manager.NodeToIndex(node_index))
-            
-            logger.debug(f"   Клиент '{customer.name}' -> Автобуси {allowed_vehicles} (center приоритет)")
-        
-        logger.info(f"✅ Добавени ограничения за {len(self.customers)} клиента с center bus приоритет")
-    
+
+    def _get_depot_index_for_vehicle(self, vehicle_config: VehicleConfig) -> int:
+        """Намира индекса на депото за дадено превозно средство."""
+        if vehicle_config.start_location and vehicle_config.start_location in self.unique_depots:
+            return self.unique_depots.index(vehicle_config.start_location)
+        # Връщаме основното депо по подразбиране
+        return 0
+
     def _extract_solution(self, manager, routing, solution, data) -> CVRPSolution:
-        """Извлича решението от OR-Tools с поддръжка за множество депа"""
+        """Извлича решението от OR-Tools и го попълва в нашите структури."""
+        logger.info("--- ИЗВЛИЧАНЕ НА РЕШЕНИЕ ---")
+        start_time = time.time()
+        
+        # Директно взимаме "времевото измерение" от солвъра.
+        # Това е "източникът на истината" за времето.
+        time_dimension = routing.GetDimensionOrDie("Time")
+        
         routes = []
         total_distance = 0
-        total_time = 0
+        total_time_seconds = 0
         
         num_depots = len(self.unique_depots)
         all_serviced_customer_indices = set()
@@ -600,7 +453,6 @@ class ORToolsSolver:
         for vehicle_id in range(routing.vehicles()):
             route_customers = []
             route_distance = 0
-            route_time = 0
             
             # Определяме кое е депото за този vehicle според data model
             vehicle_config = self._get_vehicle_config_for_id(vehicle_id)
@@ -616,8 +468,18 @@ class ORToolsSolver:
 
             depot_location = self.unique_depots[start_node]
             
+            logger.info(f"Extracting route for vehicle {vehicle_id}")
+
             index = routing.Start(vehicle_id)
+            max_iterations = len(self.customers) + 10  # Максимум итерации: брой клиенти + малко запас
+            iteration_count = 0
+
             while not routing.IsEnd(index):
+                iteration_count += 1
+                if iteration_count > max_iterations:
+                    logger.error(f"❌ Безкраен цикъл открит при извличане на маршрут за vehicle {vehicle_id}. Прекратявам.")
+                    break
+
                 node_index = manager.IndexToNode(index)
                 # Проверяваме дали това е клиент (не депо)
                 if node_index >= num_depots:  # Клиентите са след депата в матрицата
@@ -635,27 +497,27 @@ class ORToolsSolver:
                 from_node = manager.IndexToNode(previous_index)
                 to_node = manager.IndexToNode(index)
                 actual_distance = self.distance_matrix.distances[from_node][to_node]
-                actual_time = self.distance_matrix.durations[from_node][to_node]
                 
                 route_distance += actual_distance
-                route_time += actual_time
             
-            if route_customers:  # само ако има клиенти в маршрута
-                # Добавяме service time за всеки клиент (10 минути според config)
-                total_service_time = len(route_customers) * vehicle_config.service_time_minutes * 60  # в секунди
-                
+            if route_customers:
+                # КЛЮЧОВА ПРОМЯНА: Взимаме времето директно от решението на солвъра.
+                # Това гарантира 100% консистентност между оптимизация и отчет.
+                route_end_index = routing.End(vehicle_id)
+                route_time_seconds = solution.Value(time_dimension.CumulVar(route_end_index))
+
                 route = Route(
                     vehicle_type=vehicle_config.vehicle_type,
                     vehicle_id=vehicle_id,
                     customers=route_customers,
                     depot_location=depot_location,
-                    total_distance_km=route_distance / 1000,  # от метри в км
-                    total_time_minutes=(route_time + total_service_time) / 60,  # в минути
+                    total_distance_km=route_distance / 1000,
+                    total_time_minutes=route_time_seconds / 60, # Превръщаме от секунди в минути
                     total_volume=sum(c.volume for c in route_customers),
                     is_feasible=True
                 )
                 
-                # Валидация на distance constraint
+                # Връщаме валидациите, за да сме сигурни, че решението спазва правилата
                 if (vehicle_config.max_distance_km and 
                     route.total_distance_km > vehicle_config.max_distance_km):
                     logger.warning(f"⚠️ Автобус {vehicle_id} ({vehicle_config.vehicle_type.value}) "
@@ -663,18 +525,33 @@ class ORToolsSolver:
                                   f"{vehicle_config.max_distance_km}км")
                     route.is_feasible = False
                 
-                # Валидация на capacity constraint  
                 if route.total_volume > vehicle_config.capacity:
                     logger.warning(f"⚠️ Автобус {vehicle_id} ({vehicle_config.vehicle_type.value}) "
                                   f"надвишава capacity лимит: {route.total_volume:.1f}ст > "
                                   f"{vehicle_config.capacity}ст")
                     route.is_feasible = False
+
+                if (vehicle_config.max_customers_per_route and
+                    len(route.customers) > vehicle_config.max_customers_per_route):
+                     logger.warning(f"⚠️ Автобус {vehicle_id} ({vehicle_config.vehicle_type.value}) "
+                                   f"надвишава лимита за клиенти: {len(route.customers)} > "
+                                   f"{vehicle_config.max_customers_per_route}")
+                     route.is_feasible = False
+
+                if route.total_time_minutes > (vehicle_config.max_time_hours * 60) + 1: # +1 за закръгления
+                    logger.warning(f"⚠️ Автобус {vehicle_id} ({vehicle_config.vehicle_type.value}) "
+                                  f"надвишава time лимит: {route.total_time_minutes:.1f}мин > "
+                                  f"{vehicle_config.max_time_hours * 60}мин")
+                    route.is_feasible = False
                 
                 routes.append(route)
                 total_distance += route_distance
-                total_time += route_time + total_service_time
+                total_time_seconds += route_time_seconds
+        
+        logger.info(f"  - Извличане на маршрути отне: {time.time() - start_time:.2f} сек.")
         
         # Намираме пропуснатите клиенти
+        start_dropped_time = time.time()
         all_customer_indices = set(range(len(self.customers)))
         dropped_customer_indices = all_customer_indices - all_serviced_customer_indices
         dropped_customers = [self.customers[i] for i in dropped_customer_indices]
@@ -688,44 +565,29 @@ class ORToolsSolver:
             if len(dropped_customers) > 10:
                 logger.warning(f"   - ... и още {len(dropped_customers) - 10}")
         
+        logger.info(f"  - Обработка на пропуснати клиенти отне: {time.time() - start_dropped_time:.2f} сек.")
+
+        total_served_volume = sum(r.total_volume for r in routes)
+
         cvrp_solution = CVRPSolution(
             routes=routes,
             dropped_customers=dropped_customers,
             total_distance_km=total_distance / 1000,
-            total_time_minutes=total_time / 60,
+            total_time_minutes=total_time_seconds / 60,
             total_vehicles_used=len(routes),
-            fitness_score=total_distance / 1000,  # използваме разстоянието като fitness
-            is_feasible=True
+            fitness_score=float(solution.ObjectiveValue()),
+            is_feasible=True, # Ще се обнови по-долу
+            total_served_volume=total_served_volume
         )
         
         # Проверка на общата валидност на решението
         invalid_routes = [r for r in routes if not r.is_feasible]
         is_solution_feasible = not invalid_routes and not dropped_customers
-
-        if invalid_routes:
-            cvrp_solution.is_feasible = False
-            logger.error(f"❌ {len(invalid_routes)} от {len(routes)} маршрута нарушават ограниченията!")
-            for route in invalid_routes:
-                vehicle_config = self._get_vehicle_config_for_id(route.vehicle_id)
-                logger.error(f"   Автобус {route.vehicle_id} ({vehicle_config.vehicle_type.value}): "
-                           f"{route.total_distance_km:.1f}км/{vehicle_config.max_distance_km}км, "
-                           f"{route.total_volume:.1f}ст/{vehicle_config.capacity}ст")
-        elif dropped_customers:
-            cvrp_solution.is_feasible = False
-            logger.warning("🟡 Решението е валидно, но някои клиенти са пропуснати.")
-        else:
-            logger.info("✅ Всички маршрути съответстват на ограниченията и всички клиенти са обслужени!")
+        cvrp_solution.is_feasible = is_solution_feasible
         
-        # Финална информация в прогрес tracker-а  
-        if hasattr(self, 'progress_tracker'):
-            self.progress_tracker.best_solution_value = total_distance
-            
-        logger.info(f"OR-Tools намери решение с {len(routes)} маршрута")
-        logger.info(f"Общо разстояние: {cvrp_solution.total_distance_km:.2f} км")
-        logger.info(f"Решение е валидно: {'✅ Да' if cvrp_solution.is_feasible else '❌ Не'}")
-        
+        logger.info(f"--- РЕШЕНИЕТО ИЗВЛЕЧЕНО ({time.time() - start_time:.2f} сек.) ---")
         return cvrp_solution
-    
+
     def _get_vehicle_config_for_id(self, vehicle_id: int) -> VehicleConfig:
         """Намира конфигурацията за превозно средство по ID"""
         current_id = 0
@@ -743,260 +605,257 @@ class ORToolsSolver:
         
         raise ValueError("Няма включени превозни средства")
     
-    def _create_backup_solution(self) -> CVRPSolution:
-        """Интелигентен fallback алгоритъм ако OR-Tools не работи - СПАЗВА КМ ОГРАНИЧЕНИЯ"""
-        logger.warning("🔄 ИЗПОЛЗВАМ BACKUP АЛГОРИТЪМ вместо OR-Tools")
-        logger.warning("   Това НЕ е оптимално - проверете защо OR-Tools не работи!")
+    def _create_empty_solution(self) -> CVRPSolution:
+        """Създава празно решение в случай на грешка."""
+        return CVRPSolution(routes=[], dropped_customers=[], total_distance_km=0,
+                            total_time_minutes=0, total_vehicles_used=0,
+                            fitness_score=float('inf'), is_feasible=False, total_served_volume=0)
+
+    def solve_simple(self) -> CVRPSolution:
+        """
+        Опростено решение, което точно следва класическия OR-Tools пример.
+        Само capacity constraints, без допълнителни ограничения.
+        """
+        if not ORTOOLS_AVAILABLE:
+            logger.error("❌ OR-Tools не е инсталиран")
+            return self._create_empty_solution()
         
+        try:
+            # 1. Създаване на data model (опростен)
+            data = self._create_simple_data_model()
+            
+            # 2. Създаване на мениджър (single depot)
+            manager = pywrapcp.RoutingIndexManager(
+                len(data['distance_matrix']), 
+                data['num_vehicles'], 
+                data['depot']
+            )
+            routing = pywrapcp.RoutingModel(manager)
+
+            # 3. Distance callback - точно като в примера
+            def distance_callback(from_index, to_index):
+                from_node = manager.IndexToNode(from_index)
+                to_node = manager.IndexToNode(to_index)
+                return data['distance_matrix'][from_node][to_node]
+            
+            transit_callback_index = routing.RegisterTransitCallback(distance_callback)
+            routing.SetArcCostEvaluatorOfAllVehicles(transit_callback_index)
+
+            # 4. Demand callback - точно като в примера
+            def demand_callback(from_index):
+                from_node = manager.IndexToNode(from_index)
+                return data['demands'][from_node]
+            
+            demand_callback_index = routing.RegisterUnaryTransitCallback(demand_callback)
+            
+            # 5. Capacity constraints - точно като в примера
+            routing.AddDimensionWithVehicleCapacity(
+                demand_callback_index,
+                0,  # null capacity slack
+                data['vehicle_capacities'],  # vehicle maximum capacities
+                True,  # start cumul to zero
+                "Capacity"
+            )
+
+            # 6. Search parameters - точно като в примера
+            search_parameters = pywrapcp.DefaultRoutingSearchParameters()
+            search_parameters.first_solution_strategy = (
+                routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
+            )
+            search_parameters.local_search_metaheuristic = (
+                routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
+            )
+            search_parameters.time_limit.seconds = self.config.time_limit_seconds
+            search_parameters.log_search = self.config.log_search
+            
+            # Настройки за избягване на "зависване" в опростения solver
+            search_parameters.solution_limit = 100  # Ограничаваме броя решения
+            search_parameters.use_unfiltered_first_solution_strategy = True  # По-бързо първо решение
+            
+            # LNS настройки
+            lns_seconds = self.config.lns_time_limit_seconds
+            search_parameters.lns_time_limit.seconds = int(lns_seconds)
+            search_parameters.lns_time_limit.nanos = int((lns_seconds % 1) * 1e9)
+
+            # 7. Решаване с progress tracking
+            logger.info("🔄 Стартиране на опростен OR-Tools solver...")
+            
+            # Създаваме progress tracker
+            progress_tracker = ORToolsProgressTracker(self.config.time_limit_seconds, len(self.customers))
+            
+            # Стартираме tracking
+            progress_tracker.start_tracking()
+            
+            try:
+                solution = routing.SolveWithParameters(search_parameters)
+                
+                # Спираме tracking
+                progress_tracker.stop_tracking()
+                
+                # 8. Обработка на решението
+                if solution:
+                    logger.info("✅ Намерено решение с опростена логика")
+                    return self._extract_simple_solution(manager, routing, solution, data)
+                else:
+                    logger.error("❌ Опростеният solver не намери решение")
+                    return self._create_empty_solution()
+                    
+            except Exception as solve_error:
+                progress_tracker.stop_tracking()
+                raise solve_error
+
+        except Exception as e:
+            logger.error(f"❌ Грешка в опростения solver: {e}", exc_info=True)
+            return self._create_empty_solution()
+
+    def _create_simple_data_model(self):
+        """Създава опростен data model като в OR-Tools примера"""
+        data = {}
+        
+        # Distance matrix - използваме OSRM данните
+        data['distance_matrix'] = self.distance_matrix.distances
+        
+        # Demands - депо има 0, клиенти имат реални стойности
+        data['demands'] = [0] + [int(c.volume * 100) for c in self.customers]
+        
+        # Vehicle capacities - всички превозни средства
+        data['vehicle_capacities'] = []
+        for v_config in self.vehicle_configs:
+            if v_config.enabled:
+                for _ in range(v_config.count):
+                    data['vehicle_capacities'].append(int(v_config.capacity * 100))
+        
+        # Брой превозни средства
+        data['num_vehicles'] = len(data['vehicle_capacities'])
+        
+        # Депо - винаги индекс 0
+        data['depot'] = 0
+        
+        logger.info(f"📊 Опростен data model: {len(self.customers)} клиента, {data['num_vehicles']} превозни средства")
+        
+        return data
+
+    def _extract_simple_solution(self, manager, routing, solution, data) -> CVRPSolution:
+        """Извлича решението от опростения solver"""
         routes = []
-        current_customers = self.customers.copy()
-        vehicle_id = 0
+        total_distance = 0
         
-        # Сортираме клиентите по обем (малки първо за по-добро запълване)
-        current_customers.sort(key=lambda c: c.volume)
+        all_serviced_customer_indices = set()
         
-        for vehicle_config in self.vehicle_configs:
-            if not vehicle_config.enabled:
+        for vehicle_id in range(data['num_vehicles']):
+            if not routing.IsVehicleUsed(solution, vehicle_id):
                 continue
                 
-            for _ in range(vehicle_config.count):
-                if not current_customers:
-                    break
-                    
-                # Запълваме автобуса според капацитета И километрите му
-                route_customers = []
-                current_volume = 0.0
-                current_distance = 0.0
-                remaining_customers = []
+            route_customers = []
+            route_distance = 0
+            
+            # Намираме конфигурацията на превозното средство
+            vehicle_config = self._get_vehicle_config_for_id(vehicle_id)
+            
+            index = routing.Start(vehicle_id)
+            while not routing.IsEnd(index):
+                node_index = manager.IndexToNode(index)
                 
-                for customer in current_customers:
-                    # Проверка за capacity constraint
-                    if current_volume + customer.volume > vehicle_config.capacity:
-                        remaining_customers.append(customer)
-                        continue
-                    
-                    # Изчисляваме разстоянието ако добавим този клиент
-                    depot_idx = 0  # depot е винаги 0
-                    customer_idx = self.customers.index(customer) + 1  # +1 защото depot е 0
-                    
-                    # Разстояние от депо до клиент
-                    distance_to_customer = self.distance_matrix.distances[depot_idx][customer_idx] / 1000  # в км
-                    # Разстояние от клиент обратно до депо
-                    distance_back = self.distance_matrix.distances[customer_idx][depot_idx] / 1000  # в км
-                    
-                    # Общо разстояние за този клиент (round trip)
-                    total_trip_distance = distance_to_customer + distance_back
-                    
-                    # Проверка за distance constraint
-                    if (vehicle_config.max_distance_km and 
-                        current_distance + total_trip_distance > vehicle_config.max_distance_km):
-                        remaining_customers.append(customer)
-                        continue
-                    
-                    # Добавяме клиента ако отговаря на всички constraints
-                    route_customers.append(customer)
-                    current_volume += customer.volume
-                    current_distance += total_trip_distance
+                # Ако не е депо (индекс 0), добавяме клиента
+                if node_index != 0:
+                    customer_index = node_index - 1  # -1 защото депо е индекс 0
+                    if 0 <= customer_index < len(self.customers):
+                        customer = self.customers[customer_index]
+                        route_customers.append(customer)
+                        all_serviced_customer_indices.add(customer_index)
                 
-                current_customers = remaining_customers
+                previous_index = index
+                index = solution.Value(routing.NextVar(index))
                 
-                if route_customers:
-                    # Изчисляваме реалното разстояние за маршрута
-                    route_distance_km = self._calculate_real_route_distance(route_customers)
-                    route_time_minutes = self._calculate_real_route_time(route_customers)
-                    
-                    # Проверяваме дали маршрутът е валиден
-                    is_feasible = True
-                    if (vehicle_config.max_distance_km and 
-                        route_distance_km > vehicle_config.max_distance_km):
-                        is_feasible = False
-                        logger.warning(f"⚠️ Автобус {vehicle_id} ({vehicle_config.vehicle_type.value}) "
-                                     f"надвишава km лимит: {route_distance_km:.1f}км > {vehicle_config.max_distance_km}км")
-                    
-                    if current_volume > vehicle_config.capacity:
-                        is_feasible = False
-                        logger.warning(f"⚠️ Автобус {vehicle_id} ({vehicle_config.vehicle_type.value}) "
-                                     f"надвишава capacity лимит: {current_volume:.1f}ст > {vehicle_config.capacity}ст")
-                    
-                    route = Route(
-                        vehicle_type=vehicle_config.vehicle_type,
-                        vehicle_id=vehicle_id,
-                        customers=route_customers,
-                        depot_location=self.distance_matrix.locations[0],
-                        total_volume=current_volume,
-                        total_distance_km=route_distance_km,
-                        total_time_minutes=route_time_minutes,
-                        is_feasible=is_feasible
-                    )
-                    routes.append(route)
-                    
-                    status_icon = "✅" if is_feasible else "❌"
-                    logger.info(f"{status_icon} Автобус {vehicle_id} ({vehicle_config.vehicle_type.value}): "
-                              f"{len(route_customers)} клиента, {current_volume:.1f}/{vehicle_config.capacity}ст, "
-                              f"{route_distance_km:.1f}/{vehicle_config.max_distance_km or 999}км")
-                    vehicle_id += 1
+                # Изчисляваме разстоянието
+                route_distance += routing.GetArcCostForVehicle(
+                    previous_index, index, vehicle_id
+                )
+            
+            if route_customers:
+                # Изчисляваме реалното разстояние в километри
+                route_distance_km = route_distance / 1000
+                
+                # Изчисляваме времето (пътуване + обслужване)
+                route_time_minutes = (route_distance / 40000) * 60  # 40 км/ч средна скорост
+                route_time_minutes += len(route_customers) * vehicle_config.service_time_minutes
+                
+                route = Route(
+                    vehicle_type=vehicle_config.vehicle_type,
+                    vehicle_id=vehicle_id,
+                    customers=route_customers,
+                    depot_location=self.unique_depots[0],  # Основното депо
+                    total_distance_km=route_distance_km,
+                    total_time_minutes=route_time_minutes,
+                    total_volume=sum(c.volume for c in route_customers),
+                    is_feasible=True
+                )
+                
+                routes.append(route)
+                total_distance += route_distance
         
-        # Ако са останали клиенти, предупреждаваме
-        if current_customers:
-            logger.warning(f"⚠️ Останаха {len(current_customers)} клиента без разпределение - "
-                         f"общ обем {sum(c.volume for c in current_customers):.1f} ст.")
-            for customer in current_customers:
-                logger.warning(f"   - {customer.name}: {customer.volume}ст")
+        # Намираме пропуснатите клиенти
+        all_customer_indices = set(range(len(self.customers)))
+        dropped_customer_indices = all_customer_indices - all_serviced_customer_indices
+        dropped_customers = [self.customers[i] for i in dropped_customer_indices]
         
-        # Проверяваме общата валидност
-        invalid_routes = [r for r in routes if not r.is_feasible]
-        overall_feasible = len(invalid_routes) == 0 and len(current_customers) == 0
+        if dropped_customers:
+            logger.warning(f"⚠️ Пропуснати клиенти: {len(dropped_customers)}")
         
-        if not overall_feasible:
-            logger.error(f"❌ Решението НЕ е напълно валидно:")
-            logger.error(f"   - Невалидни маршрути: {len(invalid_routes)}")
-            logger.error(f"   - Неразпределени клиенти: {len(current_customers)}")
-        else:
-            logger.info("✅ Fallback решението е ВАЛИДНО и спазва всички ограничения!")
+        total_served_volume = sum(r.total_volume for r in routes)
         
         return CVRPSolution(
             routes=routes,
-            dropped_customers=[],
-            total_distance_km=sum(r.total_distance_km for r in routes),
+            dropped_customers=dropped_customers,
+            total_distance_km=total_distance / 1000,
             total_time_minutes=sum(r.total_time_minutes for r in routes),
             total_vehicles_used=len(routes),
-            fitness_score=sum(r.total_distance_km for r in routes),
-            is_feasible=overall_feasible
+            fitness_score=float(solution.ObjectiveValue()),
+            is_feasible=True,
+            total_served_volume=total_served_volume
         )
-    
-    def _calculate_real_route_distance(self, route_customers: List[Customer]) -> float:
-        """Изчислява реалното разстояние за маршрут спрямо OSRM матрицата"""
-        if not route_customers:
-            return 0.0
-        
-        total_distance = 0.0
-        depot_idx = 0
-        
-        # От депо до първия клиент
-        first_customer_idx = self.customers.index(route_customers[0]) + 1
-        total_distance += self.distance_matrix.distances[depot_idx][first_customer_idx]
-        
-        # Между клиентите
-        for i in range(len(route_customers) - 1):
-            from_customer_idx = self.customers.index(route_customers[i]) + 1
-            to_customer_idx = self.customers.index(route_customers[i + 1]) + 1
-            total_distance += self.distance_matrix.distances[from_customer_idx][to_customer_idx]
-        
-        # От последния клиент обратно до депо
-        last_customer_idx = self.customers.index(route_customers[-1]) + 1
-        total_distance += self.distance_matrix.distances[last_customer_idx][depot_idx]
-        
-        return total_distance / 1000  # от метри в километри
-    
-    def _calculate_real_route_time(self, route_customers: List[Customer]) -> float:
-        """Изчислява реалното време за маршрут спрямо OSRM матрицата"""
-        if not route_customers:
-            return 0.0
-        
-        total_time = 0.0
-        depot_idx = 0
-        
-        # От депо до първия клиент
-        first_customer_idx = self.customers.index(route_customers[0]) + 1
-        total_time += self.distance_matrix.durations[depot_idx][first_customer_idx]
-        
-        # Между клиентите
-        for i in range(len(route_customers) - 1):
-            from_customer_idx = self.customers.index(route_customers[i]) + 1
-            to_customer_idx = self.customers.index(route_customers[i + 1]) + 1
-            total_time += self.distance_matrix.durations[from_customer_idx][to_customer_idx]
-        
-        # От последния клиент обратно до депо
-        last_customer_idx = self.customers.index(route_customers[-1]) + 1
-        total_time += self.distance_matrix.durations[last_customer_idx][depot_idx]
-        
-        # Добавяме service time (15 минути на клиент)
-        service_time = len(route_customers) * 15 * 60  # в секунди
-        
-        return (total_time + service_time) / 60  # от секунди в минути
 
 
 class CVRPSolver:
-    """Главен клас за решаване на CVRP"""
+    """Главен клас за решаване на CVRP - опростена версия."""
     
     def __init__(self, config: Optional[CVRPConfig] = None):
         self.config = config or get_config().cvrp
-        self.osrm_client = OSRMClient()
     
-    def solve(self, allocation: WarehouseAllocation, depot_location: Tuple[float, float]) -> CVRPSolution:
-        """Решава CVRP за дадените клиенти с поддръжка за множество депа"""
-        logger.info("Започвам решаване на CVRP проблема")
+    def solve(self, 
+              allocation: WarehouseAllocation, 
+              depot_location: Tuple[float, float],
+              distance_matrix: DistanceMatrix) -> CVRPSolution:
         
-        customers = allocation.vehicle_customers
-        if not customers:
-            logger.warning("Няма клиенти за оптимизация")
-            return CVRPSolution([], [], 0, 0, 0, 0, True)
-
-        # Получаване на включените превозни средства
-        from config import config_manager
-        enabled_vehicles = config_manager.get_enabled_vehicles()
+        enabled_vehicles = get_config().vehicles or []
         
-        # СТЪПКА 1: Събираме всички уникални депа/start_location-и
-        unique_depots = set()
-        unique_depots.add(depot_location)  # Основното депо винаги се включва
-        
+        unique_depots = {depot_location}
         for vehicle_config in enabled_vehicles:
-            if vehicle_config.start_location:
+            if vehicle_config.enabled and vehicle_config.start_location:
                 unique_depots.add(vehicle_config.start_location)
         
-        unique_depots = list(unique_depots)
+        solver = ORToolsSolver(
+            self.config, enabled_vehicles, allocation.vehicle_customers, 
+            distance_matrix, sorted(list(unique_depots))
+        )
         
-        # ВАЖНО: Сортираме депата за консистентност - center депо първо
-        # Това осигурява че center_location винаги ще е на индекс 0
-        center_location = get_config().locations.center_location
-        if center_location in unique_depots:
-            unique_depots.remove(center_location)
-            unique_depots.insert(0, center_location)  # Center депо на индекс 0
-        
-        logger.info(f"🏭 Уникални депа: {len(unique_depots)}")
-        for i, depot in enumerate(unique_depots):
-            if depot == center_location:
-                logger.info(f"   Депо {i}: {depot} (CENTER)")
-            elif depot == depot_location:
-                logger.info(f"   Депо {i}: {depot} (MAIN)")
-            else:
-                logger.info(f"   Депо {i}: {depot}")
-        
-        # СТЪПКА 2: Създаваме разширена матрица: [депа] + [клиенти]
-        all_locations = unique_depots + [c.coordinates for c in customers]
-        
-        logger.info("🔍 Търся матрица с разстояния в централния кеш...")
-        distance_matrix = get_distance_matrix_from_central_cache(all_locations)
-        
-        if distance_matrix is None:
-            logger.info("💾 Няма данни в кеша - правя нова OSRM заявка")
-            distance_matrix = self.osrm_client.get_distance_matrix(all_locations)
+        # Избираме кой solver да използваме
+        if self.config.use_simple_solver:
+            logger.info("🔧 Използване на опростен solver (само capacity constraints)")
+            return solver.solve_simple()
         else:
-            logger.info("✅ Използвам матрица от централния кеш - без OSRM заявки!")
-        
-        # Решаване с OR-Tools
-        if self.config.algorithm == "or_tools":
-            solver = ORToolsSolver(self.config, enabled_vehicles, customers, distance_matrix, unique_depots)
-        else:
-            logger.warning(f"Неподдържан алгоритъм: {self.config.algorithm}, използвам OR-Tools")
-            solver = ORToolsSolver(self.config, enabled_vehicles, customers, distance_matrix, unique_depots)
-        
-        solution = solver.solve()
-        
-        logger.info(f"CVRP решен: {solution.total_vehicles_used} превозни средства")
-        
-        return solution
+            logger.info("🔧 Използване на пълен solver (всички constraints)")
+            return solver.solve()
     
     def close(self):
-        """Затваря ресурсите"""
-        self.osrm_client.close()
+        pass
 
 
 # Удобна функция
-def solve_cvrp(allocation: WarehouseAllocation, depot_location: Tuple[float, float]) -> CVRPSolution:
+def solve_cvrp(allocation: WarehouseAllocation, 
+               depot_location: Tuple[float, float], 
+               distance_matrix: DistanceMatrix) -> CVRPSolution:
     """Удобна функция за решаване на CVRP"""
     solver = CVRPSolver()
-    try:
-        return solver.solve(allocation, depot_location)
-    finally:
-        solver.close() 
+    # close() вече не е нужен, тъй като няма OSRM клиент
+    return solver.solve(allocation, depot_location, distance_matrix) 

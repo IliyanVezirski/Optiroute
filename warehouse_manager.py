@@ -148,17 +148,49 @@ class WarehouseManager:
     
     def _allocate_largest_to_warehouse(self, customers: List[Customer], total_capacity: int) -> Tuple[List[Customer], List[Customer]]:
         """
-        Разпределя клиенти. В тази версия цялото предварително филтриране е изключено.
-        Всички клиенти се подават директно към OR-Tools solver-а, който взима
-        решение кои от тях да пропусне, ако е необходимо.
+        Разпределя клиенти, като първо отделя тези, които са твърде големи, за да се поберат
+        в който и да е наличен бус.
         """
-        logger.info("⏩ Предварителното филтриране на клиенти е ИЗКЛЮЧЕНО.")
-        logger.info("   Всички клиенти се изпращат към CVRP solver-а.")
+        logger.info("✅ Активирано е предварително филтриране на заявки.")
 
-        # Всички клиенти отиват директно към solver-а.
-        vehicle_customers = customers
-        warehouse_customers = [] # Складът остава празен на този етап.
+        if not self.vehicle_configs:
+            logger.warning("Няма дефинирани превозни средства. Всички клиенти отиват към solver-а.")
+            return customers, []
+
+        # 1. Намираме капацитета на НАЙ-ГОЛЕМИЯ единичен бус
+        max_vehicle_capacity = 0
+        for v_config in self.vehicle_configs:
+            if v_config.enabled and v_config.capacity > max_vehicle_capacity:
+                max_vehicle_capacity = v_config.capacity
         
+        if max_vehicle_capacity == 0:
+            logger.warning("Няма налични превозни средства с капацитет > 0.")
+            return customers, []
+            
+        logger.info(f"ДЕБЪГ: Максимален капацитет на единичен бус: {max_vehicle_capacity}")
+
+        # 2. Определяме прага за "голяма" заявка
+        large_request_threshold_volume = max_vehicle_capacity * self.config.large_request_threshold
+        logger.info(f"ДЕБЪГ: Праг за 'голяма' заявка (над {self.config.large_request_threshold:.0%}): {large_request_threshold_volume:.2f} ст.")
+
+        vehicle_customers = []
+        warehouse_customers = []
+
+        for customer in customers:
+            # 3. Проверяваме дали клиентът е АБСОЛЮТНО невъзможен
+            if customer.volume > max_vehicle_capacity:
+                logger.warning(f"ДЕБЪГ: Клиент '{customer.name}' (обем: {customer.volume}) е твърде голям "
+                               f"(надвишава {max_vehicle_capacity}) и се изпраща директно в склада.")
+                warehouse_customers.append(customer)
+                continue
+
+            # 4. Проверяваме дали да го преместим в склада според конфигурацията
+            if self.config.move_largest_to_warehouse and customer.volume > large_request_threshold_volume:
+                logger.info(f"ДЕБЪГ: Клиент '{customer.name}' (обем: {customer.volume}) се счита за 'голям' и се изпраща в склада.")
+                warehouse_customers.append(customer)
+            else:
+                vehicle_customers.append(customer)
+
         # Финални изчисления
         vehicle_volume = sum(c.volume for c in vehicle_customers)
         warehouse_volume = sum(c.volume for c in warehouse_customers)
