@@ -50,6 +50,13 @@ class LocationConfig:
     """GPS координати за важни локации в системата."""
     depot_location: Tuple[float, float] = (42.695785029219415, 23.23165887245312)  # Главно депо, от което тръгват повечето превозни средства.
     center_location: Tuple[float, float] = (42.69735652560932, 23.323809998750914) # Специална локация "Център", използвана за CENTER_BUS.
+    center_zone_radius_km: float = 2  # Радиус на център зоната в километри
+    enable_center_zone_priority: bool = True  # Дали да се прилага приоритет за център зоната
+    
+    # Параметри за глобата на останалите бусове за влизане в центъра
+    external_bus_center_penalty_multiplier: float = 10.0  # Множител за глоба на EXTERNAL_BUS за влизане в центъра
+    internal_bus_center_penalty_multiplier: float = 5.0   # Множител за глоба на INTERNAL_BUS за влизане в центъра
+    enable_center_zone_restrictions: bool = True  # Дали да се прилагат ограничения за влизане в центъра
 
 
 @dataclass
@@ -116,7 +123,7 @@ class CVRPConfig:
     # Описание: SIMULATED_ANNEALING е по-добра за избягване на локални оптимуми.
     # Стойности: "AUTOMATIC", "GUIDED_LOCAL_SEARCH", "SIMULATED_ANNEALING", "TABU_SEARCH".
     
-    lns_time_limit_seconds: float = 0.1
+    lns_time_limit_seconds: float = 2
     # Описание: Много кратък микро-лимит принуждава solver-а да се движи бързо.
     # Употреба: 0.1 секунди е достатъчно за една стъпка, но не позволява зависване.
 
@@ -137,16 +144,16 @@ class CVRPConfig:
     # Описание: Дали да се използва опростеният solver, който точно следва OR-Tools примера.
     # True = само capacity constraints, False = всички ограничения (distance, time, stops)
     
-    num_workers: int = 7
+    num_workers: int = 8
     # Описание: Брой паралелни процеси. -1 означава да се използват всички ядра без едно.
 
     parallel_first_solution_strategies: List[str] = field(default_factory=lambda: [
-        "AUTOMATIC", "PARALLEL_CHEAPEST_INSERTION", "SAVINGS", "PATH_CHEAPEST_ARC", "GLOBAL_CHEAPEST_ARC","PATH_CHEAPEST_ARC","BEST_INSERTION"
+        "AUTOMATIC", "PARALLEL_CHEAPEST_INSERTION", "SAVINGS", "PATH_CHEAPEST_ARC", "GLOBAL_CHEAPEST_ARC","PATH_CHEAPEST_ARC","BEST_INSERTION","CHRISTOFIDES"
     ])
     # Описание: Списък с "First Solution" стратегии, които да се състезават в паралелен режим.
 
     parallel_local_search_metaheuristics: List[str] = field(default_factory=lambda: [
-        "AUTOMATIC", "GUIDED_LOCAL_SEARCH", "GUIDED_LOCAL_SEARCH", "TABU_SEARCH", "GUIDED_LOCAL_SEARCH", "GUIDED_LOCAL_SEARCH","GUIDED_LOCAL_SEARCH"
+        "AUTOMATIC", "GUIDED_LOCAL_SEARCH", "GUIDED_LOCAL_SEARCH", "TABU_SEARCH", "GUIDED_LOCAL_SEARCH", "GUIDED_LOCAL_SEARCH","GUIDED_LOCAL_SEARCH","GUIDED_LOCAL_SEARCH"
     ])
     # Описание: Списък с "Local Search" метаевристики, които да се състезават в паралелен режим.
 
@@ -253,7 +260,7 @@ class MainConfig:
                 vehicle_type=VehicleType.INTERNAL_BUS,
                 capacity=360,
                 count=4,
-                max_distance_km=80, # Премахнато
+                max_distance_km=70, # Премахнато
                 max_time_hours=8,
                 service_time_minutes=5,
                 enabled=True,
@@ -265,7 +272,7 @@ class MainConfig:
                 vehicle_type=VehicleType.CENTER_BUS,
                 capacity=250,
                 count=1,
-                max_distance_km=50, # Премахнато
+                max_distance_km=60, # Премахнато
                 max_time_hours=9,
                 service_time_minutes=8,
                 enabled=True,
@@ -277,7 +284,7 @@ class MainConfig:
                 vehicle_type=VehicleType.EXTERNAL_BUS,
                 capacity=360,
                 count=3,
-                max_distance_km=180, # Премахнато
+                max_distance_km=150, # Премахнато
                 max_time_hours=8,
                 service_time_minutes=5, # КОРИГИРАНО
                 enabled=True,

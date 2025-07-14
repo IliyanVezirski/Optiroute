@@ -16,6 +16,9 @@ from warehouse_manager import WarehouseAllocation
 from input_handler import Customer
 from osrm_client import get_distance_matrix_from_central_cache
 
+# OpenPyXL imports за Excel стилове
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+
 logger = logging.getLogger(__name__)
 
 # Настройки за различните типове превозни средства
@@ -113,6 +116,13 @@ class InteractiveMapGenerator:
         # Добавяне на депото
         self._add_depot_marker(route_map, depot_location)
         
+        # Добавяне на център зоната
+        from config import get_config
+        center_location = get_config().locations.center_location
+        center_zone_radius = get_config().locations.center_zone_radius_km
+        if get_config().locations.enable_center_zone_priority:
+            self._add_center_zone_circle(route_map, center_location, center_zone_radius)
+        
         # Добавяне на маршрутите с OSRM геометрия
         if self.config.show_route_colors:
             self._add_routes_to_map(route_map, solution.routes, depot_location)
@@ -131,7 +141,28 @@ class InteractiveMapGenerator:
             icon=folium.Icon(color='black', icon='home', prefix='fa')
         ).add_to(route_map)
     
-    def _get_osrm_route_geometry(self, start_coords: Tuple[float, float], 
+    def _add_center_zone_circle(self, route_map: folium.Map, center_location: Tuple[float, float], radius_km: float):
+        """Добавя кръг за център зоната"""
+        folium.Circle(
+            location=center_location,
+            radius=radius_km * 1000,  # Конвертираме в метри
+            color='red',
+            fill=True,
+            fillColor='red',
+            fillOpacity=0.1,
+            popup=f"<b>Център зона</b><br>Радиус: {radius_km} км",
+            tooltip="Център зона"
+        ).add_to(route_map)
+        
+        # Добавяме маркер за центъра
+        folium.Marker(
+            location=center_location,
+            popup=f"<b>Център</b><br>Координати: {center_location[0]:.6f}, {center_location[1]:.6f}<br>Радиус зона: {radius_km} км",
+            icon=folium.Icon(color='red', icon='star'),
+            tooltip="Център"
+        ).add_to(route_map)
+    
+    def _get_osrm_route_geometry(self, start_coords: Tuple[float, float],
                                 end_coords: Tuple[float, float]) -> List[Tuple[float, float]]:
         """Получава реална геометрия на маршрута от OSRM Route API"""
         try:
@@ -523,8 +554,407 @@ class ExcelExporter:
     def __init__(self, config: OutputConfig):
         self.config = config
     
+    def export_all_to_single_excel(self, solution: CVRPSolution, warehouse_customers: List[Customer]) -> str:
+        """Експортира всички данни в един Excel файл с отделни sheets"""
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        
+        # Създаваме основния файл
+        file_path = os.path.join(self.config.excel_output_dir, "cvrp_report.xlsx")
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        
+        wb = Workbook()
+        
+        # Премахваме default sheet
+        if wb.active:
+            wb.remove(wb.active)
+        
+        # 1. SHEET: Маршрути (Vehicle Routes)
+        if solution.routes:
+            self._create_routes_sheet(wb, solution)
+        
+        # 2. SHEET: Необслужени клиенти (Unserved Customers)
+        if warehouse_customers:
+            self._create_unserved_sheet(wb, warehouse_customers)
+        
+        # 3. SHEET: Обобщение (Summary)
+        self._create_summary_sheet(wb, solution, warehouse_customers)
+        
+        # 4. SHEET: Статистики по автобуси (Vehicle Statistics)
+        if solution.routes:
+            self._create_vehicle_stats_sheet(wb, solution)
+        
+        # Записваме файла
+        wb.save(file_path)
+        logger.info(f"Общ Excel отчет записан в {file_path}")
+        return file_path
+    
+    def _create_routes_sheet(self, wb, solution: CVRPSolution):
+        """Създава sheet с маршрутите"""
+        ws = wb.create_sheet("Маршрути")
+        
+        # Заглавни редове
+        headers = [
+            'Маршрут', 'Превозно средство', 'Ред в маршрута', 
+            'ID клиент', 'Име клиент', 'Обем (ст.)', 'GPS координати',
+            'Разстояние до центъра (км)', 'Депо стартова точка',
+            'Разстояние от предишен (км)', 'Накоплено разстояние (км)',
+            'Време от предишен (мин)', 'Накоплено време (мин)'
+        ]
+        
+        # Стилове за заглавния ред
+        header_font = Font(bold=True, color="FFFFFF")
+        header_fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
+        header_alignment = Alignment(horizontal="center", vertical="center")
+        
+        # Добавяме заглавния ред
+        for col, header in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=col, value=header)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = header_alignment
+        
+        # Данни за маршрутите
+        row = 2
+        center_location = get_config().locations.center_location
+        
+        for i, route in enumerate(solution.routes):
+            vehicle_name = VEHICLE_SETTINGS.get(route.vehicle_type.value, {}).get('name', 'Неизвестен')
+            
+            # Изчисляваме разстоянията и времената между клиентите
+            cumulative_distance = 0
+            cumulative_time = 0
+            previous_customer_coords = route.depot_location  # Започваме от депото
+            
+            for j, customer in enumerate(route.customers):
+                # Изчисляваме разстоянието до центъра
+                distance_to_center = self._calculate_distance_to_center(customer.coordinates, center_location) if customer.coordinates else 0.0
+                
+                # Изчисляваме разстоянието от предишния клиент
+                distance_from_previous = self._calculate_distance_between_points(
+                    previous_customer_coords, customer.coordinates
+                ) if customer.coordinates else 0.0
+                cumulative_distance += distance_from_previous
+                
+                # Изчисляваме времето от предишния клиент (приблизително)
+                time_from_previous = self._calculate_time_between_points(
+                    previous_customer_coords, customer.coordinates
+                ) if customer.coordinates else 0.0
+                cumulative_time += time_from_previous
+                
+                # Проверяваме дали клиентът е в център зоната
+                center_zone_radius = get_config().locations.center_zone_radius_km
+                is_in_center_zone = distance_to_center <= center_zone_radius
+                
+                data = [
+                    i + 1,  # Маршрут
+                    vehicle_name,  # Превозно средство
+                    j + 1,  # Ред в маршрута
+                    customer.id,  # ID клиент
+                    customer.name,  # Име клиент
+                    customer.volume,  # Обем
+                    customer.original_gps_data,  # GPS
+                    round(distance_to_center, 2),  # Разстояние до центъра
+                    f"{route.depot_location[0]:.6f}, {route.depot_location[1]:.6f}",  # Депо
+                    round(distance_from_previous, 2),  # Разстояние от предишен
+                    round(cumulative_distance, 2),  # Накоплено разстояние
+                    round(time_from_previous, 1),  # Време от предишен
+                    round(cumulative_time, 1),  # Накоплено време
+                    "ДА" if is_in_center_zone else "НЕ"  # В център зоната
+                ]
+                
+                for col, value in enumerate(data, 1):
+                    ws.cell(row=row, column=col, value=value)
+                
+                row += 1
+                previous_customer_coords = customer.coordinates
+        
+        # Автоматично разширяване на колоните
+        for column in ws.columns:
+            max_length = 0
+            column_letter = column[0].column_letter
+            for cell in column:
+                try:
+                    if len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except:
+                    pass
+            adjusted_width = min(max_length + 2, 50)
+            ws.column_dimensions[column_letter].width = adjusted_width
+    
+    def _create_unserved_sheet(self, wb, warehouse_customers: List[Customer]):
+        """Създава sheet с необслужените клиенти"""
+        ws = wb.create_sheet("Необслужени клиенти")
+        
+        headers = [
+            'ID', 'Име', 'Обем (ст.)', 'GPS координати', 
+            'Latitude', 'Longitude', 'Разстояние до центъра (км)'
+        ]
+        
+        # Стилове за заглавния ред
+        header_font = Font(bold=True, color="FFFFFF")
+        header_fill = PatternFill(start_color="C5504B", end_color="C5504B", fill_type="solid")
+        header_alignment = Alignment(horizontal="center", vertical="center")
+        
+        # Добавяме заглавния ред
+        for col, header in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=col, value=header)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = header_alignment
+        
+        # Данни
+        center_location = get_config().locations.center_location
+        row = 2
+        
+        for customer in warehouse_customers:
+            distance_to_center = self._calculate_distance_to_center(customer.coordinates, center_location)
+            
+            data = [
+                customer.id,
+                customer.name,
+                customer.volume,
+                customer.original_gps_data,
+                customer.coordinates[0] if customer.coordinates else '',
+                customer.coordinates[1] if customer.coordinates else '',
+                round(distance_to_center, 2)
+            ]
+            
+            for col, value in enumerate(data, 1):
+                ws.cell(row=row, column=col, value=value)
+            
+            row += 1
+        
+        # Автоматично разширяване на колоните
+        for column in ws.columns:
+            max_length = 0
+            column_letter = column[0].column_letter
+            for cell in column:
+                try:
+                    if len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except:
+                    pass
+            adjusted_width = min(max_length + 2, 50)
+            ws.column_dimensions[column_letter].width = adjusted_width
+    
+    def _create_summary_sheet(self, wb, solution: CVRPSolution, warehouse_customers: List[Customer]):
+        """Създава sheet с обобщение"""
+        ws = wb.create_sheet("Обобщение")
+        
+        # Стилове
+        title_font = Font(bold=True, size=14)
+        header_font = Font(bold=True)
+        header_fill = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
+        
+        # Заглавие
+        ws['A1'] = "CVRP ОТЧЕТ - ОБОБЩЕНИЕ"
+        ws['A1'].font = title_font
+        
+        # Основни статистики
+        row = 3
+        stats = [
+            ("Общо клиенти", len(solution.routes) + len(warehouse_customers)),
+            ("Обслужени клиенти", sum(len(route.customers) for route in solution.routes)),
+            ("Необслужени клиенти", len(warehouse_customers)),
+            ("Брой маршрути", len(solution.routes)),
+            ("Общо разстояние (км)", round(solution.total_distance_km, 2)),
+            ("Общо време (мин)", round(solution.total_time_minutes, 2)),
+            ("Общ обем (ст.)", round(sum(route.total_volume for route in solution.routes), 2))
+        ]
+        
+        for stat_name, stat_value in stats:
+            ws[f'A{row}'] = stat_name
+            ws[f'A{row}'].font = header_font
+            ws[f'B{row}'] = stat_value
+            row += 1
+        
+        # Статистики по тип автобус
+        row += 2
+        ws[f'A{row}'] = "СТАТИСТИКИ ПО ТИП АВТОБУС"
+        ws[f'A{row}'].font = title_font
+        row += 1
+        
+        vehicle_stats = {}
+        for route in solution.routes:
+            vehicle_type = route.vehicle_type.value
+            if vehicle_type not in vehicle_stats:
+                vehicle_stats[vehicle_type] = {
+                    'count': 0, 'distance': 0, 'volume': 0, 'customers': 0
+                }
+            vehicle_stats[vehicle_type]['count'] += 1
+            vehicle_stats[vehicle_type]['distance'] += route.total_distance_km
+            vehicle_stats[vehicle_type]['volume'] += route.total_volume
+            vehicle_stats[vehicle_type]['customers'] += len(route.customers)
+        
+        # Заглавни редове за статистики
+        headers = ['Тип автобус', 'Брой маршрути', 'Общо разстояние (км)', 'Общ обем (ст.)', 'Общо клиенти']
+        for col, header in enumerate(headers, 1):
+            cell = ws.cell(row=row, column=col, value=header)
+            cell.font = header_font
+            cell.fill = header_fill
+        row += 1
+        
+        # Данни за статистики
+        for vehicle_type, stats in vehicle_stats.items():
+            vehicle_name = VEHICLE_SETTINGS.get(vehicle_type, {}).get('name', vehicle_type)
+            data = [
+                vehicle_name,
+                stats['count'],
+                round(stats['distance'], 2),
+                round(stats['volume'], 2),
+                stats['customers']
+            ]
+            for col, value in enumerate(data, 1):
+                ws.cell(row=row, column=col, value=value)
+            row += 1
+        
+        # Автоматично разширяване на колоните
+        for column in ws.columns:
+            max_length = 0
+            column_letter = column[0].column_letter
+            for cell in column:
+                try:
+                    if len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except:
+                    pass
+            adjusted_width = min(max_length + 2, 50)
+            ws.column_dimensions[column_letter].width = adjusted_width
+    
+    def _create_vehicle_stats_sheet(self, wb, solution: CVRPSolution):
+        """Създава sheet със статистики по отделни автобуси"""
+        ws = wb.create_sheet("Статистики по автобуси")
+        
+        headers = [
+            'Маршрут', 'Тип автобус', 'Брой клиенти', 'Общ обем (ст.)',
+            'Разстояние (км)', 'Време (мин)', 'Капацитет използване (%)',
+            'Средно разстояние до центъра (км)', 'Депо стартова точка'
+        ]
+        
+        # Стилове за заглавния ред
+        header_font = Font(bold=True, color="FFFFFF")
+        header_fill = PatternFill(start_color="70AD47", end_color="70AD47", fill_type="solid")
+        header_alignment = Alignment(horizontal="center", vertical="center")
+        
+        # Добавяме заглавния ред
+        for col, header in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=col, value=header)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = header_alignment
+        
+        # Данни
+        center_location = get_config().locations.center_location
+        row = 2
+        
+        for i, route in enumerate(solution.routes):
+            vehicle_name = VEHICLE_SETTINGS.get(route.vehicle_type.value, {}).get('name', 'Неизвестен')
+            
+            # Изчисляваме средното разстояние до центъра
+            distances_to_center = []
+            for customer in route.customers:
+                distance = self._calculate_distance_to_center(customer.coordinates, center_location)
+                distances_to_center.append(distance)
+            avg_distance_to_center = sum(distances_to_center) / len(distances_to_center) if distances_to_center else 0
+            
+            # Капацитет използване (трябва да вземем capacity от config)
+            vehicle_config = self._get_vehicle_config(route.vehicle_type)
+            capacity_usage = 0
+            if vehicle_config and vehicle_config.capacity > 0:
+                capacity_usage = (route.total_volume / vehicle_config.capacity * 100)
+            
+            data = [
+                i + 1,  # Маршрут
+                vehicle_name,  # Тип автобус
+                len(route.customers),  # Брой клиенти
+                round(route.total_volume, 2),  # Общ обем
+                round(route.total_distance_km, 2),  # Разстояние
+                round(route.total_time_minutes, 2),  # Време
+                round(capacity_usage, 1),  # Капацитет използване
+                round(avg_distance_to_center, 2),  # Средно разстояние до центъра
+                f"{route.depot_location[0]:.6f}, {route.depot_location[1]:.6f}"  # Депо
+            ]
+            
+            for col, value in enumerate(data, 1):
+                ws.cell(row=row, column=col, value=value)
+            
+            row += 1
+        
+        # Автоматично разширяване на колоните
+        for column in ws.columns:
+            max_length = 0
+            column_letter = column[0].column_letter
+            for cell in column:
+                try:
+                    if len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except:
+                    pass
+            adjusted_width = min(max_length + 2, 50)
+            ws.column_dimensions[column_letter].width = adjusted_width
+    
+    def _calculate_distance_to_center(self, coordinates: Optional[Tuple[float, float]], center_location: Tuple[float, float]) -> float:
+        """Изчислява разстоянието до центъра в км"""
+        if not coordinates or not center_location:
+            return 0.0
+        
+        from math import radians, sin, cos, sqrt, atan2
+        R = 6371  # Earth radius in km
+        
+        lat1, lon1 = radians(coordinates[0]), radians(coordinates[1])
+        lat2, lon2 = radians(center_location[0]), radians(center_location[1])
+        
+        dlat = lat2 - lat1
+        dlon = lon2 - lon1
+        
+        a = sin(dlat/2)**2 + cos(lat1)*cos(lat2)*sin(dlon/2)**2
+        c = 2 * atan2(sqrt(a), sqrt(1-a))
+        
+        return R * c
+    
+    def _calculate_distance_between_points(self, point1: Optional[Tuple[float, float]], point2: Optional[Tuple[float, float]]) -> float:
+        """Изчислява разстоянието между две точки в км"""
+        if not point1 or not point2:
+            return 0.0
+        
+        from math import radians, sin, cos, sqrt, atan2
+        R = 6371  # Earth radius in km
+        
+        lat1, lon1 = radians(point1[0]), radians(point1[1])
+        lat2, lon2 = radians(point2[0]), radians(point2[1])
+        
+        dlat = lat2 - lat1
+        dlon = lon2 - lon1
+        
+        a = sin(dlat/2)**2 + cos(lat1)*cos(lat2)*sin(dlon/2)**2
+        c = 2 * atan2(sqrt(a), sqrt(1-a))
+        
+        return R * c
+    
+    def _calculate_time_between_points(self, point1: Optional[Tuple[float, float]], point2: Optional[Tuple[float, float]]) -> float:
+        """Изчислява времето за пътуване между две точки в минути (приблизително)"""
+        if not point1 or not point2:
+            return 0.0
+        
+        distance_km = self._calculate_distance_between_points(point1, point2)
+        # Приблизително време за пътуване: 2 минути на км (градски транспорт)
+        # Това включва спирачки, светофари, задръствания и т.н.
+        return distance_km * 2
+
+    def _get_vehicle_config(self, vehicle_type):
+        """Връща конфигурацията за даден тип превозно средство"""
+        from config import get_config
+        vehicle_configs = get_config().vehicles
+        
+        if vehicle_configs:
+            for config in vehicle_configs:
+                if config.vehicle_type == vehicle_type:
+                    return config
+        return None
+    
     def export_warehouse_orders(self, warehouse_customers: List[Customer]) -> str:
-        """Експортира заявките в склада"""
+        """Експортира заявките в склада (за съвместимост)"""
         if not warehouse_customers:
             logger.info("Няма заявки за експорт в склада")
             return ""
@@ -550,7 +980,7 @@ class ExcelExporter:
         return file_path
     
     def export_vehicle_routes(self, solution: CVRPSolution) -> str:
-        """Експортира маршрутите на превозните средства"""
+        """Експортира маршрутите на превозните средства (за съвместимост)"""
         file_path = os.path.join(self.config.excel_output_dir, self.config.routes_excel_file)
         os.makedirs(os.path.dirname(file_path), exist_ok=True)
         
@@ -596,19 +1026,14 @@ class OutputHandler:
             map_file = map_gen.save_map(route_map)
             output_files['map'] = map_file
         
-        # 2. Обединяване на всички необслужени клиенти и експорт
+        # 2. Обединяване на всички необслужени клиенти
         all_unserviced_customers = warehouse_allocation.warehouse_customers + solution.dropped_customers
-        if all_unserviced_customers:
-            logger.info(f"Общо необслужени клиенти (склад + пропуснати): {len(all_unserviced_customers)}")
-            warehouse_file = self.excel_exporter.export_warehouse_orders(all_unserviced_customers)
-            if warehouse_file:
-                output_files['warehouse_excel'] = warehouse_file
         
-        # 3. Експорт на маршрутите
-        if solution.routes:
-            routes_file = self.excel_exporter.export_vehicle_routes(solution)
-            if routes_file:
-                output_files['routes_excel'] = routes_file
+        # 3. Експорт в един общ Excel файл с отделни sheets
+        if solution.routes or all_unserviced_customers:
+            excel_file = self.excel_exporter.export_all_to_single_excel(solution, all_unserviced_customers)
+            if excel_file:
+                output_files['excel_report'] = excel_file
         
         logger.info(f"Генерирани {len(output_files)} изходни файла")
         return output_files

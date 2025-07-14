@@ -6,10 +6,34 @@
 from typing import List, Tuple, Dict, Optional, Any
 from dataclasses import dataclass
 import logging
-from config import get_config, WarehouseConfig, VehicleConfig
+import math
+from config import get_config, WarehouseConfig, VehicleConfig, VehicleType
 from input_handler import Customer, InputData
 
 logger = logging.getLogger(__name__)
+
+
+def calculate_distance_km(coord1: Optional[Tuple[float, float]], coord2: Tuple[float, float]) -> float:
+    """Изчислява разстоянието между две GPS координати в километри (Haversine формула)"""
+    if not coord1 or not coord2:
+        return 0.0
+    
+    lat1, lon1 = math.radians(coord1[0]), math.radians(coord1[1])
+    lat2, lon2 = math.radians(coord2[0]), math.radians(coord2[1])
+    
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    
+    a = math.sin(dlat/2)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon/2)**2
+    c = 2 * math.asin(math.sqrt(a))
+    
+    return 6371 * c  # 6371 km е радиусът на Земята
+
+
+def is_in_center_zone(customer_coords: Optional[Tuple[float, float]], center_location: Tuple[float, float], radius_km: float) -> bool:
+    """Проверява дали клиентът е в център зоната"""
+    distance = calculate_distance_km(customer_coords, center_location)
+    return distance <= radius_km
 
 
 @dataclass
@@ -21,6 +45,7 @@ class WarehouseAllocation:
     total_vehicle_volume: float
     warehouse_volume: float
     capacity_utilization: float
+    center_zone_customers: Optional[List[Customer]] = None  # клиенти в център зоната
 
 
 class WarehouseManager:
@@ -29,6 +54,7 @@ class WarehouseManager:
     def __init__(self, config: Optional[WarehouseConfig] = None):
         self.config = config or get_config().warehouse
         self.vehicle_configs = get_config().vehicles
+        self.location_config = get_config().locations
     
     def allocate_customers(self, input_data: InputData) -> WarehouseAllocation:
         """Разпределя клиентите между превозни средства и склад"""
@@ -80,6 +106,12 @@ class WarehouseManager:
         # НОВА ЛОГИКА: Най-големите клиенти отиват в склада
         vehicle_customers, warehouse_customers = self._allocate_largest_to_warehouse(customers, total_capacity)
         
+        # ИДЕНТИФИЦИРАНЕ НА КЛИЕНТИ В ЦЕНТЪР ЗОНАТА
+        center_zone_customers = []
+        if self.location_config.enable_center_zone_priority:
+            center_zone_customers = self._identify_center_zone_customers(vehicle_customers)
+            logger.info(f"🎯 Намерени {len(center_zone_customers)} клиента в център зоната (радиус {self.location_config.center_zone_radius_km} км)")
+        
         current_volume = sum(c.volume for c in vehicle_customers)
         warehouse_volume = sum(c.volume for c in warehouse_customers)
         
@@ -93,7 +125,8 @@ class WarehouseManager:
             total_vehicle_capacity=total_capacity,
             total_vehicle_volume=current_volume,
             warehouse_volume=warehouse_volume,
-            capacity_utilization=current_volume / total_capacity if total_capacity > 0 else 0
+            capacity_utilization=current_volume / total_capacity if total_capacity > 0 else 0,
+            center_zone_customers=center_zone_customers
         )
     
     def _knapsack_allocation(self, customers: List[Customer], capacity: int) -> Optional[Tuple[List[Customer], List[Customer]]]:
@@ -209,6 +242,22 @@ class WarehouseManager:
             logger.error(f"❌ Грешка в разпределението: Input {total_input_volume:.1f} != Output {total_output_volume:.1f}")
         
         return vehicle_customers, warehouse_customers
+    
+    def _identify_center_zone_customers(self, customers: List[Customer]) -> List[Customer]:
+        """Идентифицира клиентите, които са в център зоната"""
+        center_zone_customers = []
+        
+        for customer in customers:
+            if customer.coordinates and is_in_center_zone(
+                customer.coordinates, 
+                self.location_config.center_location, 
+                self.location_config.center_zone_radius_km
+            ):
+                center_zone_customers.append(customer)
+                logger.debug(f"🎯 Клиент '{customer.name}' е в център зоната (разстояние: "
+                           f"{calculate_distance_km(customer.coordinates, self.location_config.center_location):.2f} км)")
+        
+        return center_zone_customers
     
     def optimize_allocation(self, allocation: WarehouseAllocation) -> WarehouseAllocation:
         """
