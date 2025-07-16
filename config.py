@@ -5,7 +5,8 @@
 
 import os
 from dataclasses import dataclass, field
-from tkinter import TRUE
+# from tkinter import TRUE  # Премахнато за EXE съвместимост
+TRUE = True  # Заменяме tkinter.TRUE с Python True
 from typing import Dict, Any, Optional, List, Tuple
 from enum import Enum
 
@@ -27,6 +28,7 @@ class VehicleType(Enum):
     INTERNAL_BUS = "internal_bus"  # Стандартен бус за вътрешни маршрути
     CENTER_BUS = "center_bus"      # Специализиран бус за централна градска част
     EXTERNAL_BUS = "external_bus"  # Бус за дълги, извънградски маршрути
+    SPECIAL_BUS = "special_bus"    # Нов тип бус със специален режим на работа
     WAREHOUSE = "warehouse"        # Виртуален тип за заявки, които се обработват от склад
     DISABLED = "disabled"          # Тип за изключени от употреба превозни средства
 
@@ -35,7 +37,7 @@ class VehicleType(Enum):
 class VehicleConfig:
     """Конфигурация за един тип превозно средство."""
     vehicle_type: VehicleType  # Тип на превозното средство (от VehicleType enum)
-    capacity: int              # Максимален капацитет/обем (в стотинки, грамове или друга единица)
+    capacity: int              # Максимален капацитет/обем (в стекове, грамове или друга единица)
     count: int                 # Брой налични превозни средства от този тип
     max_distance_km: Optional[int] = None  # Максимален пробег в километри за един маршрут. None означава без лимит.
     max_time_hours: int = 8    # Максимално време за работа по един маршрут в часове (включва пътуване и обслужване).
@@ -56,6 +58,7 @@ class LocationConfig:
     # Параметри за глобата на останалите бусове за влизане в центъра
     external_bus_center_penalty_multiplier: float = 10.0  # Множител за глоба на EXTERNAL_BUS за влизане в центъра
     internal_bus_center_penalty_multiplier: float = 5.0   # Множител за глоба на INTERNAL_BUS за влизане в центъра
+    special_bus_center_penalty_multiplier: float = 7.0    # Множител за глоба на SPECIAL_BUS за влизане в центъра
     enable_center_zone_restrictions: bool = True  # Дали да се прилагат ограничения за влизане в центъра
 
 
@@ -130,10 +133,32 @@ class CVRPConfig:
     log_search: bool = True
     # Описание: Дали OR-Tools да извежда детайлен лог на процеса на търсене.
 
-    # --- Логика за пропускане на клиенти ---
-    drop_penalty_uniform_high_value: int = 99999999999999999
-    # Описание: Висока "неустойка" за пропускане на клиент. Кара solver-а да пропуска
-    #           клиенти само в краен случай, ако е невъзможно да се вместят в ограниченията.
+    # --- Настройки за приоритизиране на далечни клиенти ---
+    distance_normalization_factor: float = 10000
+    # Описание: Фактор за нормализиране на разстоянието при изчисляване на намаленията.
+    # По-голяма стойност = по-малки намаления за далечни клиенти.
+    
+    volume_normalization_factor: float = 360
+    # Описание: Фактор за нормализиране на обема при изчисляване на намаленията.
+    
+    distance_weight: float = 0.7
+    # Описание: Тежест на разстоянието при изчисляване на комбиниран фактор за намаления.
+    # Стойност между 0.0 и 1.0. По-голяма стойност дава по-голям приоритет на далечните клиенти.
+    
+    volume_weight: float = 0.3
+    # Описание: Тежест на обема при изчисляване на комбиниран фактор за намаления.
+    # Стойност между 0.0 и 1.0. По-голяма стойност дава по-голям приоритет на клиентите с малък обем.
+    
+    max_discount_percentage: float = 0.40
+    # Описание: Максимално допустимо намаление на разходите като процент (0.25 = 25%).
+    
+    discount_factor_divisor: float = 2.0
+    # Описание: Делител за комбиниран фактор при изчисляване на намалението.
+    # По-голяма стойност = по-малки намаления.
+    
+    distance_penalty_disjunction: int = 100000
+    # Описание: Фиксирано наказание за пропускане на клиент.
+    # По-малка стойност = по-лесно пропускане на клиенти.
 
     # --- Настройки за паралелна обработка ---
     enable_parallel_solving: bool = True
@@ -144,16 +169,36 @@ class CVRPConfig:
     # Описание: Дали да се използва опростеният solver, който точно следва OR-Tools примера.
     # True = само capacity constraints, False = всички ограничения (distance, time, stops)
     
+    # --- Финален реконфигурация на маршрутите ---
+    enable_final_depot_reconfiguration: bool = True
+    # Описание: Дали след като OR-Tools намери решение, да се реконфигурират всички маршрути
+    # да започват от депото, независимо от оригиналните стартови точки.
+    # True = всички маршрути започват от депото, False = запазват оригиналните стартови точки.
+    
     num_workers: int = 8
     # Описание: Брой паралелни процеси. -1 означава да се използват всички ядра без едно.
 
     parallel_first_solution_strategies: List[str] = field(default_factory=lambda: [
-        "AUTOMATIC", "PARALLEL_CHEAPEST_INSERTION", "SAVINGS", "PATH_CHEAPEST_ARC", "GLOBAL_CHEAPEST_ARC","PATH_CHEAPEST_ARC","BEST_INSERTION","CHRISTOFIDES"
+        "PARALLEL_CHEAPEST_INSERTION",
+        "PARALLEL_CHEAPEST_INSERTION",
+        "BEST_INSERTION",
+        "PATH_CHEAPEST_ARC",
+        "SWEEP",
+        "GLOBAL_CHEAPEST_ARC",
+        "BEST_INSERTION",
+        "CHRISTOFIDES"
     ])
     # Описание: Списък с "First Solution" стратегии, които да се състезават в паралелен режим.
 
     parallel_local_search_metaheuristics: List[str] = field(default_factory=lambda: [
-        "AUTOMATIC", "GUIDED_LOCAL_SEARCH", "GUIDED_LOCAL_SEARCH", "TABU_SEARCH", "GUIDED_LOCAL_SEARCH", "GUIDED_LOCAL_SEARCH","GUIDED_LOCAL_SEARCH","GUIDED_LOCAL_SEARCH"
+        "TABU_SEARCH",
+        "GUIDED_LOCAL_SEARCH", 
+        "GUIDED_LOCAL_SEARCH",
+        "SIMULATED_ANNEALING",
+        "GUIDED_LOCAL_SEARCH",
+        "TABU_SEARCH",
+        "SIMULATED_ANNEALING",
+        "GUIDED_LOCAL_SEARCH"
     ])
     # Описание: Списък с "Local Search" метаевристики, които да се състезават в паралелен режим.
 
@@ -262,33 +307,46 @@ class MainConfig:
                 count=4,
                 max_distance_km=70, # Премахнато
                 max_time_hours=8,
-                service_time_minutes=5,
+                service_time_minutes=7,
                 enabled=True,
-                max_customers_per_route=45
-
+                max_customers_per_route=45,
+                start_location=depot_main  # Тръгва от главното депо
             ),
             # 2. Център бус - 1 бр.
             VehicleConfig(
                 vehicle_type=VehicleType.CENTER_BUS,
                 capacity=250,
                 count=1,
-                max_distance_km=60, # Премахнато
-                max_time_hours=9,
-                service_time_minutes=8,
+                max_distance_km=50, # Премахнато
+                max_time_hours=8,
+                service_time_minutes=9,
                 enabled=True,
                 max_customers_per_route=45,
-                start_location= depot_main # Тръгва от центъра
+                start_location=depot_center  # Тръгва от център депото
             ),
             # 3. Външни бусове - 3 бр, 360 ст.
             VehicleConfig(
                 vehicle_type=VehicleType.EXTERNAL_BUS,
                 capacity=360,
                 count=3,
-                max_distance_km=150, # Премахнато
-                max_time_hours=8,
+                max_distance_km=160, # Премахнато
+                max_time_hours=8,   
                 service_time_minutes=5, # КОРИГИРАНО
                 enabled=True,
                 max_customers_per_route=40,
+                start_location=depot_main  # Тръгва от главното депо
+            ),
+            # 4. Специални бусове - 2 бр, 300 ст. (изключени по подразбиране)
+            VehicleConfig(
+                vehicle_type=VehicleType.SPECIAL_BUS,
+                capacity=300,
+                count=2,
+                max_distance_km=100,
+                max_time_hours=8,   
+                service_time_minutes=6,
+                enabled=False,  # Изключени по подразбиране
+                max_customers_per_route=35,
+                start_location=depot_main  # Тръгва от главното депо
             )
         ]
 

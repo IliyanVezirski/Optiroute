@@ -333,44 +333,109 @@ class ORToolsSolver:
             # 4. ЛОГИКА ЗА ПРОПУСКАНЕ НА КЛИЕНТИ - с ДИНАМИЧНА глоба по твоята формула
             logger.info("Използва се ДИНАМИЧНА глоба за пропускане на клиенти, базирана на разстояние и обем.")
             
-            # Тежести за формулата
-            distance_penalty_weight = 5000
-            volume_penalty_weight = 50000
+            # Вземаме параметрите от конфигурацията
+            distance_normalization_factor = self.config.distance_normalization_factor
+            volume_normalization_factor = self.config.volume_normalization_factor
+            distance_weight = self.config.distance_weight
+            volume_weight = self.config.volume_weight
+            max_discount_percentage = self.config.max_discount_percentage
+            discount_factor_divisor = self.config.discount_factor_divisor
+            distance_penalty_disjunction = self.config.distance_penalty_disjunction
+            
+            logger.info(f"Параметри от конфигурацията: distance_weight={distance_weight}, volume_weight={volume_weight}, "
+                       f"max_discount={max_discount_percentage*100:.1f}%, discount_divisor={discount_factor_divisor}")
 
             # Създаваме списък с клиенти в център зоната за бързо търсене
             center_zone_customer_ids = {c.id for c in self.center_zone_customers}
             
             logger.info(f"🎯 Прилагане на приоритет за център зоната: {len(self.center_zone_customers)} клиента")
 
+            # Глобален callback за намаляване на разходите за далечни клиенти с малък обем
+            logger.info("🌟 Настройка на приоритети за далечни клиенти")
+            
+            # Вземаме параметрите от конфигурацията
+            distance_normalization_factor = self.config.distance_normalization_factor
+            volume_normalization_factor = self.config.volume_normalization_factor
+            distance_weight = self.config.distance_weight
+            volume_weight = self.config.volume_weight
+            max_discount_percentage = self.config.max_discount_percentage
+            discount_factor_divisor = self.config.discount_factor_divisor
+            
+            # Създаваме отделен callback за всеки тип превозно средство
+            
+            # 1. БАЗОВ CALLBACK - запазва оригиналните разходи
+            def base_distance_callback(from_index, to_index):
+                from_node = manager.IndexToNode(from_index)
+                to_node = manager.IndexToNode(to_index)
+                return int(self.distance_matrix.distances[from_node][to_node])
+                
+            base_callback_index = routing.RegisterTransitCallback(base_distance_callback)
+            
+            # Първо регистрираме базовия callback за всички превозни средства
+            routing.SetArcCostEvaluatorOfAllVehicles(base_callback_index)
+            
+            # 2. CALLBACK за EXTERNAL_BUS и INTERNAL_BUS - намалява разходите за далечни клиенти с малък обем
+            def priority_non_center_callback(from_index, to_index):
+                from_node = manager.IndexToNode(from_index)
+                to_node = manager.IndexToNode(to_index)
+                
+                # Базова цена (разстояние)
+                base_distance = self.distance_matrix.distances[from_node][to_node]
+                
+                # Ако това е клиент (не депо), прилагаме намаление според формулата
+                if to_node >= len(self.unique_depots):
+                    customer_index = to_node - len(self.unique_depots)
+                    customer = self.customers[customer_index]
+                    
+                    # Данни за клиента
+                    customer_volume = customer.volume
+                    distance_from_depot_m = customer.distance_from_depot_m
+                    
+                    # Нормализиране на разстоянието - по-големите разстояния дават по-големи стойности
+                    distance_factor = distance_from_depot_m / distance_normalization_factor
+                    
+                    # Нормализиране на обема - по-малките обеми дават по-големи стойности
+                    volume_factor = (volume_normalization_factor - customer_volume) / volume_normalization_factor
+                    
+                    # Комбиниран фактор - колкото по-голям е, толкова по-голямо е намалението
+                    combined_factor = (distance_factor * distance_weight) + (volume_factor * volume_weight)
+                    
+                    # Прилагаме намаление от 0% до max_discount_percentage на базовата цена
+                    discount = min(max_discount_percentage, combined_factor / discount_factor_divisor)
+                    
+                    # Връщаме намалената цена
+                    return int(base_distance * (1.0 - discount))
+                
+                # За всички други случаи връщаме оригиналната цена
+                return int(base_distance)
+            
+            # Регистрираме callback-а за намаляване на разходите
+            priority_non_center_callback_index = routing.RegisterTransitCallback(priority_non_center_callback)
+            
+            # Прилагаме callback-а САМО за EXTERNAL_BUS и INTERNAL_BUS превозни средства
+            logger.info(f"🚛 Прилагане на приоритет за далечни клиенти само за EXTERNAL_BUS и INTERNAL_BUS")
+            
+            # Прилагаме callback-а за EXTERNAL_BUS превозни средства
+            for vehicle_id in data['external_bus_vehicle_ids']:
+                routing.SetArcCostEvaluatorOfVehicle(priority_non_center_callback_index, vehicle_id)
+                logger.debug(f"  - Приложен приоритет за далечни клиенти за EXTERNAL_BUS #{vehicle_id}")
+            
+            # Прилагаме callback-а за INTERNAL_BUS превозни средства
+            for vehicle_id in data['internal_bus_vehicle_ids']:
+                routing.SetArcCostEvaluatorOfVehicle(priority_non_center_callback_index, vehicle_id)
+                logger.debug(f"  - Приложен приоритет за далечни клиенти за INTERNAL_BUS #{vehicle_id}")
+                
+            # Прилагаме callback-а за SPECIAL_BUS превозни средства
+            for vehicle_id in data['special_bus_vehicle_ids']:
+                routing.SetArcCostEvaluatorOfVehicle(priority_non_center_callback_index, vehicle_id)
+                logger.debug(f"  - Приложен приоритет за далечни клиенти за SPECIAL_BUS #{vehicle_id}")
+                
+            logger.info(f"✅ Настроен приоритет за далечни клиенти")
+            
+            # Все още добавяме възможност за пропускане на клиенти, но с по-ниско наказание
             for node_idx in range(len(self.unique_depots), len(data['distance_matrix'])):
-                customer_index = node_idx - len(self.unique_depots)
-                customer = self.customers[customer_index]
-
-                # Разстояние от главното депо (индекс 0) до клиента в метри
-                distance_from_depot_m = self.distance_matrix.distances[0][node_idx]
-                
-                # Обем на клиента
-                customer_volume = customer.volume
-                
-                # Проверяваме дали клиентът е в център зоната
-                is_center_zone_customer = customer.id in center_zone_customer_ids
-                
-                # Изчисляваме динамичната глоба по формулата:
-                # (разстояние депо - клиент * 50000) + (обем клиент / 100 * 50000)
-                base_penalty = int(
-                    (distance_from_depot_m * distance_penalty_weight) + 
-                    (customer_volume / 100 * volume_penalty_weight)
-                )
-                
-                # Ако клиентът е в център зоната, намаляваме глобата за да се даде приоритет
-                if is_center_zone_customer:
-                    # Намаляваме глобата с 50% за клиенти в център зоната
-                    penalty = int(base_penalty * 1)
-                    logger.debug(f"🎯 Клиент '{customer.name}' е в център зоната - намалена глоба: {penalty}")
-                else:
-                    penalty = base_penalty
-
-                routing.AddDisjunction([manager.NodeToIndex(node_idx)], penalty)
+                # Добавяме възможността за пропускане, но с умерена глоба
+                routing.AddDisjunction([manager.NodeToIndex(node_idx)], distance_penalty_disjunction)
 
             # 5. ПРИОРИТИЗИРАНЕ НА CENTER_BUS ЗА ЦЕНТЪР ЗОНАТА
             if self.center_zone_customers and data['center_bus_vehicle_ids']:
@@ -463,8 +528,41 @@ class ORToolsSolver:
                 
                 for vehicle_id in data['internal_bus_vehicle_ids']:
                     routing.SetArcCostEvaluatorOfVehicle(internal_bus_callback_index, vehicle_id)
+                    
+            # 8. ГЛОБА ЗА SPECIAL_BUS ЗА ВЛИЗАНЕ В ЦЕНТЪРА
+            if data['special_bus_vehicle_ids'] and self.location_config and self.location_config.enable_center_zone_restrictions:
+                logger.info("🔶 Прилагане на глоба за SPECIAL_BUS в център зоната")
+                
+                # Създаваме callback за глоба на SPECIAL_BUS
+                def special_bus_penalty_callback(from_index, to_index):
+                    from_node = manager.IndexToNode(from_index)
+                    to_node = manager.IndexToNode(to_index)
+                    
+                    # Ако това е клиент в център зоната
+                    if to_node >= len(self.unique_depots):
+                        customer_index = to_node - len(self.unique_depots)
+                        customer = self.customers[customer_index]
+                        
+                        # Проверяваме дали клиентът е в център зоната
+                        if customer.coordinates and self.location_config:
+                            distance_to_center = calculate_distance_km(
+                                customer.coordinates, 
+                                self.location_config.center_location
+                            )
+                            if distance_to_center <= self.location_config.center_zone_radius_km:
+                                # Увеличаваме разходите за SPECIAL_BUS с конфигурируем множител
+                                multiplier = self.location_config.special_bus_center_penalty_multiplier if self.location_config else 7.0
+                                return int(self.distance_matrix.distances[from_node][to_node] * multiplier)
+                    
+                    return int(self.distance_matrix.distances[from_node][to_node])
+                
+                # Регистрираме callback-а за SPECIAL_BUS превозните средства
+                special_bus_callback_index = routing.RegisterTransitCallback(special_bus_penalty_callback)
+                
+                for vehicle_id in data['special_bus_vehicle_ids']:
+                    routing.SetArcCostEvaluatorOfVehicle(special_bus_callback_index, vehicle_id)
             
-            # 8. ПАРАМЕТРИ НА ТЪРСЕНЕ (Стандартни)
+            # 9. ПАРАМЕТРИ НА ТЪРСЕНЕ (Стандартни)
             logger.info("Използват се стандартни параметри за търсене.")
             search_parameters = pywrapcp.DefaultRoutingSearchParameters()
             search_parameters.first_solution_strategy = (
@@ -476,11 +574,11 @@ class ORToolsSolver:
             search_parameters.time_limit.seconds = self.config.time_limit_seconds
             search_parameters.log_search = self.config.log_search
 
-            # 9. РЕШАВАНЕ
+            # 10. РЕШАВАНЕ
             logger.info(f"🚀 Стартирам решаване с пълни ограничения (времеви лимит: {self.config.time_limit_seconds}s)...")
             solution = routing.SolveWithParameters(search_parameters)
             
-            # 10. ОБРАБОТКА НА РЕШЕНИЕТО
+            # 11. ОБРАБОТКА НА РЕШЕНИЕТО
             if solution:
                 return self._extract_solution(manager, routing, solution, data)
             else:
@@ -522,11 +620,18 @@ class ORToolsSolver:
         center_bus_vehicle_ids = []
         external_bus_vehicle_ids = []
         internal_bus_vehicle_ids = []
+        special_bus_vehicle_ids = []
         vehicle_id = 0
+        
+        logger.info("  - Настройка на депа за превозните средства:")
         
         for v_config in self.vehicle_configs:
             if v_config.enabled:
                 depot_index = self._get_depot_index_for_vehicle(v_config)
+                depot_location = self.unique_depots[depot_index]
+                
+                logger.info(f"    {v_config.vehicle_type.value}: депо {depot_index} ({depot_location})")
+                
                 for _ in range(v_config.count):
                     # Записваме ID-тата на CENTER_BUS превозните средства
                     if v_config.vehicle_type == VehicleType.CENTER_BUS:
@@ -535,6 +640,8 @@ class ORToolsSolver:
                         external_bus_vehicle_ids.append(vehicle_id)
                     elif v_config.vehicle_type == VehicleType.INTERNAL_BUS:
                         internal_bus_vehicle_ids.append(vehicle_id)
+                    elif v_config.vehicle_type == VehicleType.SPECIAL_BUS:
+                        special_bus_vehicle_ids.append(vehicle_id)
                     
                     # 1. Обем (Capacity) - стриктно
                     vehicle_capacities.append(int(v_config.capacity * 100))
@@ -564,6 +671,7 @@ class ORToolsSolver:
         data['center_bus_vehicle_ids'] = center_bus_vehicle_ids
         data['external_bus_vehicle_ids'] = external_bus_vehicle_ids
         data['internal_bus_vehicle_ids'] = internal_bus_vehicle_ids
+        data['special_bus_vehicle_ids'] = special_bus_vehicle_ids
         
         logger.info(f"  - Капацитети: {data['vehicle_capacities']}")
         logger.info(f"  - Макс. разстояния (м): {data['vehicle_max_distances']}")
@@ -572,6 +680,7 @@ class ORToolsSolver:
         logger.info(f"  - CENTER_BUS превозни средства: {center_bus_vehicle_ids}")
         logger.info(f"  - EXTERNAL_BUS превозни средства: {external_bus_vehicle_ids}")
         logger.info(f"  - INTERNAL_BUS превозни средства: {internal_bus_vehicle_ids}")
+        logger.info(f"  - SPECIAL_BUS превозни средства: {special_bus_vehicle_ids}")
         logger.info("--- DATA MODEL СЪЗДАДЕН ---")
         return data
 
@@ -698,6 +807,13 @@ class ORToolsSolver:
         
         logger.info(f"  - Извличане на маршрути отне: {time.time() - start_time:.2f} сек.")
         
+        # НОВА ФУНКЦИОНАЛНОСТ: Финален реконфигурация на маршрутите от депото
+        if self.config.enable_final_depot_reconfiguration:
+            logger.info("🔄 Прилагане на финална реконфигурация на маршрутите от депото...")
+            routes = self._reconfigure_routes_from_depot(routes)
+        else:
+            logger.info("⏭️ Пропускане на финална реконфигурация (изключена в конфигурацията)")
+        
         # Намираме пропуснатите клиенти
         start_dropped_time = time.time()
         all_customer_indices = set(range(len(self.customers)))
@@ -758,6 +874,185 @@ class ORToolsSolver:
         return CVRPSolution(routes=[], dropped_customers=[], total_distance_km=0,
                             total_time_minutes=0, total_vehicles_used=0,
                             fitness_score=float('inf'), is_feasible=False, total_served_volume=0)
+
+    def _reconfigure_routes_from_depot(self, routes: List[Route]) -> List[Route]:
+        """
+        Реконфигурира всички маршрути да започват от депото.
+        Това е финална стъпка след като OR-Tools намери решение.
+        """
+        logger.info("🔄 Реконфигуриране на маршрутите от депото...")
+        
+        # Взимаме главното депо (индекс 0)
+        main_depot = self.unique_depots[0]
+        
+        reconfigured_routes = []
+        
+        for route in routes:
+            if not route.customers:
+                continue
+                
+            # НОВА ЛОГИКА: Преизчисляваме оптималния ред на клиентите от депото
+            optimized_customers = self._optimize_route_from_depot(route.customers, main_depot)
+            
+            # Изчисляваме новите разстояния и времена от депото
+            new_distance_km, new_time_minutes = self._calculate_route_from_depot(
+                optimized_customers, main_depot
+            )
+            
+            # Създаваме нов маршрут с депото като стартова точка и оптимизиран ред
+            reconfigured_route = Route(
+                vehicle_type=route.vehicle_type,
+                vehicle_id=route.vehicle_id,
+                customers=optimized_customers,  # ОПТИМИЗИРАН ред на клиентите
+                depot_location=main_depot,  # ВИНАГИ депото
+                total_distance_km=new_distance_km,
+                total_time_minutes=new_time_minutes,
+                total_volume=sum(c.volume for c in optimized_customers),
+                is_feasible=True
+            )
+            
+            # Валидираме новия маршрут
+            vehicle_config = self._get_vehicle_config_for_id(route.vehicle_id)
+            
+            # Сравняваме оригиналните и новите стойности
+            logger.info(f"📊 Сравнение за маршрут {route.vehicle_id} ({vehicle_config.vehicle_type.value}):")
+            logger.info(f"  - Оригинално: {route.total_distance_km:.1f}км, {route.total_time_minutes:.1f}мин")
+            logger.info(f"  - От депото: {new_distance_km:.1f}км, {new_time_minutes:.1f}мин")
+            logger.info(f"  - Разлика: +{new_distance_km - route.total_distance_km:.1f}км, +{new_time_minutes - route.total_time_minutes:.1f}мин")
+            
+            if not self._validate_reconfigured_route(reconfigured_route, vehicle_config):
+                logger.warning(f"⚠️ Реконфигуриран маршрут {route.vehicle_id} НЕ спазва ограниченията!")
+                reconfigured_route.is_feasible = False
+            else:
+                logger.info(f"✅ Реконфигуриран маршрут {route.vehicle_id} спазва ограниченията")
+            
+            reconfigured_routes.append(reconfigured_route)
+        
+        logger.info(f"✅ Реконфигурирани {len(reconfigured_routes)} маршрута от депото")
+        return reconfigured_routes
+    
+    def _optimize_route_from_depot(self, customers: List[Customer], depot_location: Tuple[float, float]) -> List[Customer]:
+        """
+        Оптимизира реда на клиентите, започвайки от депото.
+        Използва greedy алгоритъм за намиране на най-близкия клиент.
+        """
+        if not customers:
+            return []
+        
+        # Намираме индекса на депото в матрицата
+        depot_index = 0  # Винаги индекс 0 е главното депо
+        
+        optimized_customers = []
+        remaining_customers = customers.copy()
+        current_node = depot_index
+        
+        while remaining_customers:
+            # Намираме най-близкия клиент от текущия node
+            min_distance = float('inf')
+            closest_customer = None
+            closest_index = -1
+            
+            for i, customer in enumerate(remaining_customers):
+                # Намираме индекса на клиента в матрицата
+                customer_index = len(self.unique_depots) + self.customers.index(customer)
+                
+                # Разстояние от текущия node до клиента
+                distance = self.distance_matrix.distances[current_node][customer_index]
+                
+                if distance < min_distance:
+                    min_distance = distance
+                    closest_customer = customer
+                    closest_index = i
+            
+            if closest_customer:
+                optimized_customers.append(closest_customer)
+                remaining_customers.pop(closest_index)
+                
+                # Обновяваме текущия node
+                customer_index = len(self.unique_depots) + self.customers.index(closest_customer)
+                current_node = customer_index
+        
+        logger.debug(f"  - Оптимизиран ред на клиентите: {[c.name for c in optimized_customers]}")
+        return optimized_customers
+    
+    def _calculate_route_from_depot(self, customers: List[Customer], depot_location: Tuple[float, float]) -> Tuple[float, float]:
+        """
+        Изчислява разстояние и време за маршрут, започващ от депото.
+        """
+        if not customers:
+            return 0.0, 0.0
+        
+        total_distance = 0.0
+        total_time = 0.0
+        
+        # Намираме индекса на депото в матрицата
+        depot_index = 0  # Винаги индекс 0 е главното депо
+        
+        # Взимаме service time от конфигурацията
+        service_time_minutes = next((v.service_time_minutes for v in self.vehicle_configs if v.enabled), 15)
+        service_time_seconds = service_time_minutes * 60
+        
+        # От депо до първия клиент
+        current_node = depot_index
+        for customer in customers:
+            # Намираме индекса на клиента в матрицата
+            customer_index = len(self.unique_depots) + self.customers.index(customer)
+            
+            # Разстояние и време от текущия node до клиента
+            distance = self.distance_matrix.distances[current_node][customer_index]
+            duration = self.distance_matrix.durations[current_node][customer_index]
+            
+            total_distance += distance
+            total_time += duration
+            
+            # Време за обслужване на клиента (само за клиенти, не за депо)
+            total_time += service_time_seconds
+            
+            current_node = customer_index
+        
+        # От последния клиент обратно в депото
+        distance = self.distance_matrix.distances[current_node][depot_index]
+        duration = self.distance_matrix.durations[current_node][depot_index]
+        
+        total_distance += distance
+        total_time += duration
+        
+        logger.debug(f"  - Изчислено от депото: {total_distance/1000:.1f}км, {total_time/60:.1f}мин")
+        return total_distance / 1000, total_time / 60  # в км и минути
+    
+    def _validate_reconfigured_route(self, route: Route, vehicle_config: VehicleConfig) -> bool:
+        """
+        Валидира реконфигуриран маршрут спрямо ограниченията.
+        """
+        logger.info(f"🔍 Валидация на реконфигуриран маршрут {route.vehicle_id} ({vehicle_config.vehicle_type.value}):")
+        logger.info(f"  - Разстояние: {route.total_distance_km:.1f}км (лимит: {vehicle_config.max_distance_km}км)")
+        logger.info(f"  - Време: {route.total_time_minutes:.1f}мин (лимит: {vehicle_config.max_time_hours * 60}мин)")
+        logger.info(f"  - Обем: {route.total_volume:.1f}ст (лимит: {vehicle_config.capacity}ст)")
+        logger.info(f"  - Клиенти: {len(route.customers)} (лимит: {vehicle_config.max_customers_per_route})")
+        
+        # Проверка на капацитета
+        if route.total_volume > vehicle_config.capacity:
+            logger.warning(f"⚠️ Реконфигуриран маршрут {route.vehicle_id} надвишава capacity лимит")
+            return False
+        
+        # Проверка на времето
+        if route.total_time_minutes > vehicle_config.max_time_hours * 60:
+            logger.warning(f"⚠️ Реконфигуриран маршрут {route.vehicle_id} надвишава time лимит")
+            return False
+        
+        # Проверка на разстоянието (ако има ограничение)
+        if vehicle_config.max_distance_km and route.total_distance_km > vehicle_config.max_distance_km:
+            logger.warning(f"⚠️ Реконфигуриран маршрут {route.vehicle_id} надвишава distance лимит")
+            return False
+        
+        # Проверка на брой клиенти
+        if (vehicle_config.max_customers_per_route and 
+            len(route.customers) > vehicle_config.max_customers_per_route):
+            logger.warning(f"⚠️ Реконфигуриран маршрут {route.vehicle_id} надвишава лимита за клиенти")
+            return False
+        
+        logger.info(f"✅ Маршрут {route.vehicle_id} спазва всички ограничения")
+        return True
 
     def solve_simple(self) -> CVRPSolution:
         """
@@ -949,6 +1244,13 @@ class ORToolsSolver:
         
         if dropped_customers:
             logger.warning(f"⚠️ Пропуснати клиенти: {len(dropped_customers)}")
+        
+        # НОВА ФУНКЦИОНАЛНОСТ: Финален реконфигурация на маршрутите от депото
+        if self.config.enable_final_depot_reconfiguration:
+            logger.info("🔄 Прилагане на финална реконфигурация на маршрутите от депото (опростен solver)...")
+            routes = self._reconfigure_routes_from_depot(routes)
+        else:
+            logger.info("⏭️ Пропускане на финална реконфигурация (изключена в конфигурацията)")
         
         total_served_volume = sum(r.total_volume for r in routes)
         

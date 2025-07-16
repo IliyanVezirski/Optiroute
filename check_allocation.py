@@ -24,7 +24,7 @@ def main():
             else:
                 print(f"   {vehicle.vehicle_type.value}: ИЗКЛЮЧЕН")
     
-    print(f"\n   ОБЩ КАПАЦИТЕТ: {total_capacity} стотинки")
+            print(f"\n   ОБЩ КАПАЦИТЕТ: {total_capacity} стекове")
     
     # Зареждане на данните
     try:
@@ -32,7 +32,7 @@ def main():
         input_handler = InputHandler()
         input_data = input_handler.load_data()
         print(f"   Общо клиенти: {len(input_data.customers)}")
-        print(f"   Общ обем: {input_data.total_volume:.1f} стотинки")
+        print(f"   Общ обем: {input_data.total_volume:.1f} стекове")
         print(f"   Съотношение обем/капацитет: {input_data.total_volume/total_capacity:.1%}")
         
         # Показване на първите 10 клиента по обем

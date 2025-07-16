@@ -25,7 +25,7 @@ def setup_exe_environment():
         print(f"📁 Работна директория: {script_dir}")
     
     # Създаваме необходимите директории ако не съществуват
-    directories = ['logs', 'output', 'cache', 'data']
+    directories = ['logs', 'output', 'cache', 'data', 'output/excel', 'output/charts']
     for directory in directories:
         Path(directory).mkdir(exist_ok=True)
     
@@ -39,51 +39,8 @@ def setup_exe_environment():
         ]
     )
 
-def copy_output_files():
-    """Копира изходните файлове от временната папка в директорията на EXE"""
-    try:
-        # Намираме временната папка на PyInstaller
-        if getattr(sys, 'frozen', False):
-            # За EXE файл, временната папка е _MEI* в temp
-            import tempfile
-            temp_dir = Path(tempfile.gettempdir())
-            me_dirs = list(temp_dir.glob('_MEI*'))
-            
-            if me_dirs:
-                # Вземаме най-новия _MEI* директорий
-                temp_me_dir = max(me_dirs, key=lambda x: x.stat().st_mtime)
-                temp_output_dir = temp_me_dir / 'output'
-                
-                if temp_output_dir.exists():
-                    print(f"📁 Копирам файлове от временната папка: {temp_output_dir}")
-                    
-                    # Копираме всички файлове от временната output папка
-                    local_output_dir = Path('output')
-                    local_output_dir.mkdir(exist_ok=True)
-                    
-                    for item in temp_output_dir.rglob('*'):
-                        if item.is_file():
-                            # Изчисляваме относителния път
-                            relative_path = item.relative_to(temp_output_dir)
-                            target_path = local_output_dir / relative_path
-                            
-                            # Създаваме директориите ако не съществуват
-                            target_path.parent.mkdir(parents=True, exist_ok=True)
-                            
-                            # Копираме файла
-                            shutil.copy2(item, target_path)
-                            print(f"  ✅ Копиран: {relative_path}")
-                    
-                    print(f"📁 Всички файлове са копирани в: {local_output_dir.absolute()}")
-                else:
-                    print("⚠️ Не са намерени изходни файлове в временната папка")
-            else:
-                print("⚠️ Не е намерена временна папка на PyInstaller")
-        else:
-            print("ℹ️ Не е EXE файл - пропускам копирането")
-            
-    except Exception as e:
-        print(f"⚠️ Грешка при копиране на файлове: {e}")
+# Забележка: Функцията copy_output_files е премахната, тъй като сега файловете
+# се създават директно в правилните директории, без нужда от копиране
 
 # Динамично зареждане на config.py от директорията на EXE файла
 def load_config():
@@ -102,6 +59,22 @@ def load_config():
             config = importlib.util.module_from_spec(spec)
             sys.modules['config'] = config
             spec.loader.exec_module(config)
+            
+            # Важно: Тук променяме пътя до входния файл да бъде спрямо EXE директорията, а не хардкоднат
+            if getattr(sys, 'frozen', False):
+                exe_dir = Path(sys.executable).parent
+                # Променяме пътя на входния файл
+                input_config = config.get_config().input
+                input_config.excel_file_path = str(exe_dir / 'data' / 'input.xlsx')
+                print(f"📝 Пренасочвам входния файл към: {input_config.excel_file_path}")
+                
+                # Променяме и пътищата на изходните файлове
+                output_config = config.get_config().output
+                output_config.map_output_file = str(exe_dir / 'output' / 'interactive_map.html')
+                output_config.excel_output_dir = str(exe_dir / 'output' / 'excel')
+                output_config.charts_output_dir = str(exe_dir / 'output' / 'charts')
+                print(f"📝 Пренасочвам изходните файлове към директория: {exe_dir / 'output'}")
+            
             print(f"✅ Конфигурация заредена от: {config_path}")
         else:
             print(f"⚠️ Не мога да заредя config.py от: {config_path}")
@@ -121,60 +94,81 @@ from main import main
 
 def main_exe():
     """Главна функция за EXE"""
-    try:
-        setup_exe_environment()
-        load_config()
-        
-        print("🚀 Стартиране на CVRP оптимизация...")
-        print("=" * 50)
-        
-        # Проверяваме дали има входен файл като аргумент
-        input_file = None
-        if len(sys.argv) > 1:
-            input_file = sys.argv[1]
-            print(f"📁 Използвам входен файл: {input_file}")
-        else:
-            # Търсим подразбиращ се файл
-            default_files = ['data/input.xlsx', 'input.xlsx']
-            for file_path in default_files:
-                if os.path.exists(file_path):
-                    input_file = file_path
-                    print(f"📁 Намерен входен файл: {input_file}")
-                    break
+    while True:  # Добавяме безкраен цикъл за повторно стартиране
+        try:
+            setup_exe_environment()
+            load_config()
             
-            if not input_file:
-                print("⚠️ Не е намерен входен файл. Създайте data/input.xlsx или посочете файл като аргумент.")
-                print("💡 Пример: CVRP_Optimizer.exe data/my_data.xlsx")
-                input("\nНатиснете Enter за да затворите програмата...")
-                sys.exit(1)
-        
-        # Заменяме sys.argv с правилните аргументи
-        original_argv = sys.argv.copy()
-        sys.argv = [sys.argv[0]]  # Запазваме само името на програмата
-        if input_file:
-            sys.argv.append(input_file)
-        
-        # Изпълняваме главната функция
-        main()
-        
-        # Възстановяваме оригиналните аргументи
-        sys.argv = original_argv
-        
-        # Копираме изходните файлове
-        print("\n📁 Копиране на изходните файлове...")
-        copy_output_files()
-        
-        print("\n✅ Програмата завърши успешно!")
-        print(f"📁 Резултатите са в директорията: {os.getcwd()}")
-        
-    except KeyboardInterrupt:
-        print("\n⚠️ Програмата е прекъсната от потребителя.")
-        sys.exit(0)
-    except Exception as e:
-        print(f"\n❌ Грешка при изпълнение: {e}")
-        logging.error(f"EXE грешка: {e}", exc_info=True)
-        input("\nНатиснете Enter за да затворите програмата...")
-        sys.exit(1)
+            print("🚀 Стартиране на CVRP оптимизация...")
+            print("=" * 50)
+            
+            # Проверяваме дали има входен файл като аргумент
+            input_file = None
+            current_dir = os.getcwd()
+            
+            if len(sys.argv) > 1:
+                input_file = sys.argv[1]
+                print(f"📁 Използвам входен файл от аргумент: {input_file}")
+            else:
+                # Търсим подразбиращ се файл - първо проверяваме в текущата директория
+                default_files = [
+                    os.path.join(current_dir, 'data', 'input.xlsx'), 
+                    os.path.join(current_dir, 'input.xlsx')
+                ]
+                
+                for file_path in default_files:
+                    if os.path.exists(file_path):
+                        input_file = file_path
+                        print(f"📁 Намерен входен файл: {input_file}")
+                        break
+                
+                if not input_file:
+                    print("⚠️ Не е намерен входен файл. Създайте data/input.xlsx или посочете файл като аргумент.")
+                    print("💡 Пример: CVRP_Optimizer.exe data/my_data.xlsx")
+                    input("\nНатиснете Enter за да затворите програмата...")
+                    sys.exit(1)
+            
+            # Заменяме sys.argv с правилните аргументи
+            original_argv = sys.argv.copy()
+            sys.argv = [sys.argv[0]]  # Запазваме само името на програмата
+            if input_file:
+                sys.argv.append(input_file)
+            
+            # Принтираме информация за пътя на файла, за да е по-ясно къде се търси
+            print(f"📁 Използвам файл: {input_file}")
+            print(f"📁 Текуща директория: {current_dir}")
+            
+            # Изпълняваме главната функция
+            main()
+            
+            # Възстановяваме оригиналните аргументи
+            sys.argv = original_argv
+            
+            # Не копираме файлове, те се създават директно в правилните директории
+            print("\n✅ Програмата завърши успешно!")
+            print(f"📁 Резултатите са в директорията: {os.path.join(current_dir, 'output')}")
+            
+            # Питаме потребителя дали иска да стартира програмата отново
+            restart = input("\n🔄 Искате ли да стартирате програмата отново? (да/не): ").lower().strip()
+            if restart != 'да' and restart != 'y' and restart != 'yes' and restart != 'д':
+                print("👋 Благодаря, че използвахте програмата! Довиждане!")
+                break  # Излизаме от безкрайния цикъл
+            
+        except KeyboardInterrupt:
+            print("\n⚠️ Програмата е прекъсната от потребителя.")
+            restart = input("\n🔄 Искате ли да стартирате програмата отново? (да/не): ").lower().strip()
+            if restart != 'да' and restart != 'y' and restart != 'yes' and restart != 'д':
+                print("👋 Благодаря, че използвахте програмата! Довиждане!")
+                break  # Излизаме от безкрайния цикъл
+        except Exception as e:
+            print(f"\n❌ Грешка при изпълнение: {e}")
+            logging.error(f"EXE грешка: {e}", exc_info=True)
+            
+            # Питаме потребителя дали иска да опита отново въпреки грешката
+            restart = input("\n🔄 Искате ли да стартирате програмата отново? (да/не): ").lower().strip()
+            if restart != 'да' and restart != 'y' and restart != 'yes' and restart != 'д':
+                print("👋 Благодаря, че използвахте програмата! Довиждане!")
+                break  # Излизаме от безкрайния цикъл
 
 if __name__ == "__main__":
     import multiprocessing

@@ -5,6 +5,7 @@
 
 import pandas as pd
 import re
+import os
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
 import logging
@@ -76,7 +77,29 @@ class InputHandler:
     
     def load_data(self, file_path: Optional[str] = None) -> InputData:
         """Зарежда данни от файл"""
+        # Използваме подадения път или взимаме от конфигурацията
         file_path = file_path or self.config.excel_file_path
+        
+        # Проверяваме дали файлът съществува, ако не опитваме да намерим файла на различни места
+        if not os.path.exists(file_path):
+            logger.warning(f"Файлът не съществува на път: {file_path}")
+            
+            # Ако пътят не е абсолютен, опитваме да го намерим в текущата директория
+            if not os.path.isabs(file_path):
+                current_dir = os.getcwd()
+                possible_paths = [
+                    os.path.join(current_dir, file_path),
+                    os.path.join(current_dir, 'data', os.path.basename(file_path)),
+                    os.path.join(current_dir, os.path.basename(file_path))
+                ]
+                
+                for possible_path in possible_paths:
+                    if os.path.exists(possible_path):
+                        logger.info(f"Намерен файл на път: {possible_path}")
+                        file_path = possible_path
+                        break
+        
+        logger.info(f"Опитвам да заредя файл от: {file_path}")
         
         try:
             # Четене на Excel файла
