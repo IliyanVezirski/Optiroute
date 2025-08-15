@@ -131,6 +131,7 @@ def get_distance_matrix(
 def generate_solver_configs(base_cvrp_config: CVRPConfig, num_workers: int) -> List[CVRPConfig]:
     """
     Генерира списък с различни конфигурации за паралелно тестване.
+    Взима стратегиите последователно от списъка.
     """
     logger = logging.getLogger(__name__)
     logger.info(f"Генерирам {num_workers} варианта на конфигурации за паралелно решаване...")
@@ -140,28 +141,25 @@ def generate_solver_configs(base_cvrp_config: CVRPConfig, num_workers: int) -> L
     first_solution_strategies = base_cvrp_config.parallel_first_solution_strategies
     local_search_metaheuristics = base_cvrp_config.parallel_local_search_metaheuristics
 
-    # Генерираме двойки стратегии, докато не запълним работниците
-    for strategy in first_solution_strategies:
-        for metaheuristic in local_search_metaheuristics:
-            if len(configs) >= num_workers:
-                break
-            
-            new_config = copy.deepcopy(base_cvrp_config)
-            new_config.first_solution_strategy = strategy
-            new_config.local_search_metaheuristic = metaheuristic
-            
-            if new_config not in configs:
-                configs.append(new_config)
+    # Взимаме стратегиите последователно от списъка
+    for i in range(num_workers):
+        # Избираме стратегия от списъка (циклично ако няма достатъчно)
+        strategy_index = i % len(first_solution_strategies)
+        metaheuristic_index = i % len(local_search_metaheuristics)
         
-        if len(configs) >= num_workers:
-            break
-    
-    # Ако все още нямаме достатъчно, добавяме базовата конфигурация
-    if len(configs) < num_workers:
-        if base_cvrp_config not in configs:
-            configs.append(base_cvrp_config)
+        strategy = first_solution_strategies[strategy_index]
+        metaheuristic = local_search_metaheuristics[metaheuristic_index]
+        
+        new_config = copy.deepcopy(base_cvrp_config)
+        new_config.first_solution_strategy = strategy
+        new_config.local_search_metaheuristic = metaheuristic
+        
+        configs.append(new_config)
 
-    logger.info(f"Създадени {len(configs)} уникални конфигурации за тестване.")
+    logger.info(f"Създадени {len(configs)} конфигурации за тестване.")
+    logger.info(f"Използвани стратегии: {[c.first_solution_strategy for c in configs]}")
+    logger.info(f"Използвани метаевристики: {[c.local_search_metaheuristic for c in configs]}")
+    
     return configs
 
 
@@ -172,6 +170,9 @@ def solve_cvrp_worker(worker_args: Tuple[WarehouseAllocation, Dict, Dict, Distan
     warehouse_allocation, cvrp_config_dict, location_config_dict, distance_matrix, worker_id = worker_args
     cvrp_config = CVRPConfig(**cvrp_config_dict)
     location_config = LocationConfig(**location_config_dict)
+
+    # Добавяме лог за дебъгване
+    print(f"[Работник {worker_id}]: use_simple_solver = {cvrp_config.use_simple_solver}")
 
     solver = CVRPSolver(cvrp_config)
     
@@ -195,7 +196,8 @@ def process_results(
     solution: CVRPSolution,
     input_data: InputData,
     warehouse_allocation: WarehouseAllocation,
-    execution_time: float
+    execution_time: float,
+    sorted_depots: List[Tuple[float, float]]
 ):
     """
     Стъпка 3: Обработва финалното (най-доброто) решение.
@@ -208,6 +210,7 @@ def process_results(
     output_handler = OutputHandler()
     
     logger.info("Генериране на изходни файлове...")
+    # Предаваме входното депо за съвместимост (ще се използват индивидуалните депа от маршрутите)
     output_files = output_handler.generate_all_outputs(
                 solution, warehouse_allocation, input_data.depot_location
             )
@@ -311,14 +314,14 @@ def main():
         valid_solutions = [sol for sol in results if sol is not None]
         
         if valid_solutions:
-            # ИЗБИРАМЕ ПОБЕДИТЕЛЯ ПО НАЙ-ГОЛЯМ ОБСЛУЖЕН ОБЕМ
+            # ИЗБИРАМЕ ПОБЕДИТЕЛЯ ПО НАЙ-ДОБЪР ФИТНЕС СКОР (НАЙ-МАЛКО РАЗСТОЯНИЕ)
             for sol in valid_solutions:
                  sol.total_served_volume = sum(r.total_volume for r in sol.routes)
 
-            best_solution = max(valid_solutions, key=lambda s: s.total_served_volume)
+            best_solution = min(valid_solutions, key=lambda s: s.fitness_score)
             
-            logger.info(f"🏆 Избрано е най-доброто решение по ОБЕМ от {len(valid_solutions)} намерени, "
-                        f"с обслужен обем: {best_solution.total_served_volume:.2f} ст.")
+            logger.info(f"🏆 Избрано е най-доброто решение по ФИТНЕС СКОР от {len(valid_solutions)} намерени, "
+                        f"с fitness score: {best_solution.fitness_score:.2f} (разстояние: {best_solution.total_distance_km:.1f}км)")
         else:
             logger.error("Всички паралелни работници се провалиха. Не е намерено решение.")
 
@@ -335,7 +338,19 @@ def main():
 
     if best_solution:
         execution_time = time.time() - start_time
-        process_results(best_solution, input_data, warehouse_allocation, execution_time)
+        # Получаваме депата за передаване към process_results
+        enabled_vehicles = get_config().vehicles or []
+        unique_depots = {config.locations.depot_location}
+        for vehicle_config in enabled_vehicles:
+            if vehicle_config.enabled and vehicle_config.start_location:
+                unique_depots.add(vehicle_config.start_location)
+        
+        # Гарантираме, че главното депо е винаги първо в списъка
+        sorted_depots = [config.locations.depot_location]  # Главното депо винаги първо
+        other_depots = sorted([d for d in unique_depots if d != config.locations.depot_location], key=lambda x: (x[0], x[1]))
+        sorted_depots.extend(other_depots)
+        
+        process_results(best_solution, input_data, warehouse_allocation, execution_time, sorted_depots)
         print("\n✅ CVRP оптимизация завършена успешно!")
     else:
         logger.error("❌ Не успях да намеря решение на проблема.")

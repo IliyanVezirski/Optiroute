@@ -326,20 +326,39 @@ class OSRMClient:
             server_type = "локален" if "localhost" in server_url else "публичен"
             logger.info(f"✅ Успешен Table API към {server_type} сървър за {len(locations)} локации")
             
+            # Проверка на отговора за диагностика
+            logger.info(f"OSRM отговор ключове: {list(data.keys())}")
+            has_distances = 'distances' in data
+            has_durations = 'durations' in data
+            logger.info(f"OSRM връща разстояния: {has_distances}, времена: {has_durations}")
+            
             # Обработка на данните
             distances = data.get('distances', [])
             durations = data.get('durations', [])
             
             if not distances and durations:
-                # Изчисляваме разстояния от времето
+                # Изчисляваме разстояния от времето с подобрена точност
                 distances = []
+                # Фактор за превръщане: средна скорост + корекционен фактор
+                speed_factor = self.config.average_speed_kmh * 1000 / 3600  # m/s
+                correction_factor = 1.1  # Разстоянията са по-дълги от идеалната права
+                
                 for i, row in enumerate(durations):
                     dist_row = []
                     for j, duration in enumerate(row):
-                        approx_distance = (duration / 3600) * (self.config.average_speed_kmh * 1000)
-                        dist_row.append(approx_distance)
+                        if i == j:
+                            # Разстоянието до себе си е 0
+                            dist_row.append(0.0)
+                        elif duration > 0:
+                            # Реалистично разстояние: време * средна скорост * корекция
+                            approx_distance = duration * speed_factor * correction_factor
+                            dist_row.append(approx_distance)
+                        else:
+                            # Ако има проблем с времето, използваме haversine за приблизителна оценка
+                            haversine_dist = self._haversine_distance(locations[i], locations[j]) * 1.3
+                            dist_row.append(haversine_dist)
                     distances.append(dist_row)
-                logger.info("Изчислени разстояния от времето")
+                logger.info("⚠️ OSRM не връща разстояния! Изчислени разстояния от времето с повишена точност.")
             
             matrix = DistanceMatrix(
                 distances=distances,
@@ -731,7 +750,8 @@ class OSRMClient:
         
         base_url = base_url.rstrip('/')
         coords_str = ';'.join([f"{lon:.6f},{lat:.6f}" for lat, lon in locations])
-        return f"{base_url}/table/v1/{self.config.profile}/{coords_str}"
+        # Добавяме annotations=distance,duration, за да получим разстояния и времена
+        return f"{base_url}/table/v1/{self.config.profile}/{coords_str}?annotations=distance,duration"
     
     def _make_post_request(self, locations: List[Tuple[float, float]], base_url: str) -> requests.Response:
         """Прави POST заявка за големи координатни списъци"""
@@ -739,7 +759,11 @@ class OSRMClient:
         url = f"{clean_base_url}/table/v1/{self.config.profile}"
         
         coordinates = [[lon, lat] for lat, lon in locations]
-        post_data = {"coordinates": coordinates}
+        # Добавяме annotations в post_data, за да получим разстояния и времена
+        post_data = {
+            "coordinates": coordinates,
+            "annotations": ["distance", "duration"]
+        }
         
         response = self.session.post(
             url, 

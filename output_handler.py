@@ -40,6 +40,12 @@ VEHICLE_SETTINGS = {
         'icon': 'truck',
         'prefix': 'fa', 
         'name': 'Външен автобус'
+    },
+    'vratza_bus': {
+        'color': 'green',
+        'icon': 'car',
+        'prefix': 'fa',
+        'name': 'Враца автобус'
     }
 }
 
@@ -105,16 +111,24 @@ class InteractiveMapGenerator:
             logger.info("🛣️ Използвам OSRM Route API за реални маршрути")
         else:
             logger.warning("📐 Използвам прави линии (OSRM недостъпен)")
+            
+        # Взимаме всички уникални депа от маршрутите
+        unique_depots = {depot_location}  # Добавяме основното депо
         
-        # Инициализация на картата
+        # Добавяме депата от маршрутите
+        for route in solution.routes:
+            if hasattr(route, 'depot_location') and route.depot_location:
+                unique_depots.add(route.depot_location)
+        
+        # Инициализация на картата с основното депо като център
         route_map = folium.Map(
             location=depot_location,
             zoom_start=self.config.map_zoom_level,
             tiles='OpenStreetMap'
         )
         
-        # Добавяне на депото
-        self._add_depot_marker(route_map, depot_location)
+        # Добавяне на всички депа
+        self._add_depot_markers(route_map, list(unique_depots))
         
         # Добавяне на център зоната
         from config import get_config
@@ -125,21 +139,37 @@ class InteractiveMapGenerator:
         
         # Добавяне на маршрутите с OSRM геометрия
         if self.config.show_route_colors:
-            self._add_routes_to_map(route_map, solution.routes, depot_location)
+            self._add_routes_to_map(route_map, solution.routes)
         
         # Добавяне на легенда
         self._add_legend(route_map, solution.routes)
         
         return route_map
     
+    def _add_depot_markers(self, route_map: folium.Map, depot_locations: List[Tuple[float, float]]):
+        """Добавя маркери за всички депа"""
+        from config import get_config
+        locations = get_config().locations
+        
+        for i, depot in enumerate(depot_locations):
+            # Определяме кое депо е това
+            depot_name = "Главно депо"
+            if depot == locations.center_location:
+                depot_name = "Център депо"
+            elif depot == locations.vratza_depot_location:
+                depot_name = "Депо Враца"
+            
+            # Добавяме специален маркер за всяко депо
+            folium.Marker(
+                depot,
+                popup=f"<b>{depot_name}</b>",
+                tooltip=depot_name,
+                icon=folium.Icon(color='black', icon='home', prefix='fa')
+            ).add_to(route_map)
+            
     def _add_depot_marker(self, route_map: folium.Map, depot_location: Tuple[float, float]):
-        """Добавя маркер за депото"""
-        folium.Marker(
-            depot_location,
-            popup="<b>Депо/Стартова точка</b>",
-            tooltip="Депо",
-            icon=folium.Icon(color='black', icon='home', prefix='fa')
-        ).add_to(route_map)
+        """Добавя маркер за едно депо (поддържа се за обратна съвместимост)"""
+        self._add_depot_markers(route_map, [depot_location])
     
     def _add_center_zone_circle(self, route_map: folium.Map, center_location: Tuple[float, float], radius_km: float):
         """Добавя кръг за център зоната"""
@@ -211,7 +241,7 @@ class InteractiveMapGenerator:
 
         # ОПТИМИЗАЦИЯ: Ако маршрутът има твърде много точки, не търсим пълна геометрия,
         # а чертаем сегменти, за да не претоварваме OSRM и да ускорим процеса.
-        MAX_WAYPOINTS_FOR_FULL_GEOMETRY = 15
+        MAX_WAYPOINTS_FOR_FULL_GEOMETRY = 50
         if len(waypoints) > MAX_WAYPOINTS_FOR_FULL_GEOMETRY:
             logger.info(f"🌀 Маршрутът има {len(waypoints)} точки (> {MAX_WAYPOINTS_FOR_FULL_GEOMETRY}). "
                         f"Използвам опростена геометрия (сегменти) за по-бърза работа.")
@@ -269,7 +299,7 @@ class InteractiveMapGenerator:
             
             return full_geometry if full_geometry else waypoints
     
-    def _add_routes_to_map(self, route_map: folium.Map, routes: List[Route], depot_location: Tuple[float, float]):
+    def _add_routes_to_map(self, route_map: folium.Map, routes: List[Route]):
         """Добавя маршрутите на картата с OSRM геометрия и филтър за бусовете"""
         # Създаваме FeatureGroup за всеки автобус
         bus_layers = {}
@@ -346,12 +376,15 @@ class InteractiveMapGenerator:
             if route.customers and self.use_osrm_routing:
                 logger.info(f"🛣️ Получавам OSRM маршрут за Автобус {route_idx + 1} с {len(route.customers)} клиента")
                 
+                # Използваме depot_location от самия маршрут
+                route_depot = route.depot_location
+                
                 # Подготвяме всички waypoints
-                waypoints = [depot_location]
+                waypoints = [route_depot]
                 for customer in route.customers:
                     if customer.coordinates:
                         waypoints.append(customer.coordinates)
-                waypoints.append(depot_location)  # Връщане в депото
+                waypoints.append(route_depot)  # Връщане в депото
                 
                 # Получаваме реалната геометрия от OSRM
                 try:
@@ -414,11 +447,12 @@ class InteractiveMapGenerator:
                 except Exception as e:
                     logger.error(f"❌ Грешка при OSRM маршрут за Автобус {route_idx + 1}: {e}")
                     # Fallback към прави линии
-                    waypoints = [depot_location]
+                    route_depot = route.depot_location
+                    waypoints = [route_depot]
                     for customer in route.customers:
                         if customer.coordinates:
                             waypoints.append(customer.coordinates)
-                    waypoints.append(depot_location)
+                    waypoints.append(route_depot)
                     
                     popup_text = f"""
                     <div style="font-family: Arial, sans-serif;">
@@ -446,11 +480,12 @@ class InteractiveMapGenerator:
             
             elif route.customers:
                 # Fallback към прави линии ако OSRM е изключен
-                waypoints = [depot_location]
+                route_depot = route.depot_location
+                waypoints = [route_depot]
                 for customer in route.customers:
                     if customer.coordinates:
                         waypoints.append(customer.coordinates)
-                waypoints.append(depot_location)
+                waypoints.append(route_depot)
                 
                 polyline = folium.PolyLine(
                     waypoints,
@@ -599,7 +634,8 @@ class ExcelExporter:
             'ID клиент', 'Име клиент', 'Обем (ст.)', 'GPS координати',
             'Разстояние до центъра (км)', 'Депо стартова точка',
             'Разстояние от предишен (км)', 'Накоплено разстояние (км)',
-            'Време от предишен (мин)', 'Накоплено време (мин)'
+            'Време от предишен (мин)', 'Накоплено време (мин)',
+            'Стартово време (мин)', 'Време с натрупване (мин)', 'Време с натрупване (чч:мм)'
         ]
         
         # Стилове за заглавния ред
@@ -621,6 +657,13 @@ class ExcelExporter:
         for i, route in enumerate(solution.routes):
             vehicle_name = VEHICLE_SETTINGS.get(route.vehicle_type.value, {}).get('name', 'Неизвестен')
             
+            # Изчисляваме стартово време за този тип превозно средство
+            start_time_minutes = self._get_start_time_for_vehicle(route.vehicle_type)
+            
+            # Взимаме service time за този тип превозно средство
+            vehicle_config = self._get_vehicle_config(route.vehicle_type)
+            service_time_minutes = vehicle_config.service_time_minutes if vehicle_config else 15
+            
             # Изчисляваме разстоянията и времената между клиентите
             cumulative_distance = 0
             cumulative_time = 0
@@ -640,7 +683,13 @@ class ExcelExporter:
                 time_from_previous = self._calculate_time_between_points(
                     previous_customer_coords, customer.coordinates
                 ) if customer.coordinates else 0.0
-                cumulative_time += time_from_previous
+                
+                # Добавяме service time за текущия клиент
+                total_time_for_this_step = time_from_previous + service_time_minutes
+                cumulative_time += total_time_for_this_step
+                
+                # Изчисляваме времето с натрупване (стартово време + натрупване)
+                total_time_with_start = start_time_minutes + cumulative_time
                 
                 # Проверяваме дали клиентът е в център зоната
                 center_zone_radius = get_config().locations.center_zone_radius_km
@@ -658,9 +707,11 @@ class ExcelExporter:
                     f"{route.depot_location[0]:.6f}, {route.depot_location[1]:.6f}",  # Депо
                     round(distance_from_previous, 2),  # Разстояние от предишен
                     round(cumulative_distance, 2),  # Накоплено разстояние
-                    round(time_from_previous, 1),  # Време от предишен
+                    round(total_time_for_this_step, 1),  # Време от предишен + service time
                     round(cumulative_time, 1),  # Накоплено време
-                    "ДА" if is_in_center_zone else "НЕ"  # В център зоната
+                    start_time_minutes,  # Стартово време (мин)
+                    round(total_time_with_start, 1),  # Време с натрупване (мин)
+                    self._format_time_hh_mm(int(total_time_with_start))  # Време с натрупване (чч:мм)
                 ]
                 
                 for col, value in enumerate(data, 1):
@@ -769,6 +820,37 @@ class ExcelExporter:
             ws[f'B{row}'] = stat_value
             row += 1
         
+        # Информация за стартови времена
+        row += 2
+        ws[f'A{row}'] = "СТАРТОВИ ВРЕМЕНА ПО ТИП АВТОБУС"
+        ws[f'A{row}'].font = title_font
+        row += 1
+        
+        # Заглавни редове за стартови времена
+        start_time_headers = ['Тип автобус', 'Стартово време (мин)', 'Стартово време (чч:мм)']
+        for col, header in enumerate(start_time_headers, 1):
+            cell = ws.cell(row=row, column=col, value=header)
+            cell.font = header_font
+            cell.fill = header_fill
+        row += 1
+        
+        # Данни за стартови времена
+        vehicle_types_seen = set()
+        for route in solution.routes:
+            if route.vehicle_type.value not in vehicle_types_seen:
+                vehicle_types_seen.add(route.vehicle_type.value)
+                vehicle_name = VEHICLE_SETTINGS.get(route.vehicle_type.value, {}).get('name', route.vehicle_type.value)
+                start_time_minutes = self._get_start_time_for_vehicle(route.vehicle_type)
+                
+                data = [
+                    vehicle_name,
+                    start_time_minutes,
+                    self._format_time_hh_mm(start_time_minutes)
+                ]
+                for col, value in enumerate(data, 1):
+                    ws.cell(row=row, column=col, value=value)
+                row += 1
+        
         # Статистики по тип автобус
         row += 2
         ws[f'A{row}'] = "СТАТИСТИКИ ПО ТИП АВТОБУС"
@@ -829,7 +911,7 @@ class ExcelExporter:
         headers = [
             'Маршрут', 'Тип автобус', 'Брой клиенти', 'Общ обем (ст.)',
             'Разстояние (км)', 'Време (мин)', 'Капацитет използване (%)',
-            'Средно разстояние до центъра (км)', 'Депо стартова точка'
+            'Средно разстояние до центъра (км)', 'Депо стартова точка', 'Стартово време (чч:мм)'
         ]
         
         # Стилове за заглавния ред
@@ -864,6 +946,9 @@ class ExcelExporter:
             if vehicle_config and vehicle_config.capacity > 0:
                 capacity_usage = (route.total_volume / vehicle_config.capacity * 100)
             
+            # Изчисляваме стартово време за този тип превозно средство
+            start_time_minutes = self._get_start_time_for_vehicle(route.vehicle_type)
+            
             data = [
                 i + 1,  # Маршрут
                 vehicle_name,  # Тип автобус
@@ -873,7 +958,8 @@ class ExcelExporter:
                 round(route.total_time_minutes, 2),  # Време
                 round(capacity_usage, 1),  # Капацитет използване
                 round(avg_distance_to_center, 2),  # Средно разстояние до центъра
-                f"{route.depot_location[0]:.6f}, {route.depot_location[1]:.6f}"  # Депо
+                f"{route.depot_location[0]:.6f}, {route.depot_location[1]:.6f}",  # Депо
+                self._format_time_hh_mm(start_time_minutes) # Стартово време (чч:мм)
             ]
             
             for col, value in enumerate(data, 1):
@@ -952,6 +1038,22 @@ class ExcelExporter:
                 if config.vehicle_type == vehicle_type:
                     return config
         return None
+    
+    def _get_start_time_for_vehicle(self, vehicle_type) -> int:
+        """Връща стартово време в минути за даден тип превозно средство"""
+        vehicle_config = self._get_vehicle_config(vehicle_type)
+        if vehicle_config and hasattr(vehicle_config, 'start_time_minutes'):
+            return vehicle_config.start_time_minutes
+        else:
+            # Използваме глобалното стартово време от конфигурацията
+            from config import get_config
+            return get_config().cvrp.global_start_time_minutes
+    
+    def _format_time_hh_mm(self, total_minutes: int) -> str:
+        """Форматира време в минути като чч:мм"""
+        hours = total_minutes // 60
+        minutes = total_minutes % 60
+        return f"{hours:02d}:{minutes:02d}"
     
     def export_warehouse_orders(self, warehouse_customers: List[Customer]) -> str:
         """Експортира заявките в склада (за съвместимост)"""

@@ -57,29 +57,21 @@ class WarehouseManager:
         self.location_config = get_config().locations
     
     def allocate_customers(self, input_data: InputData) -> WarehouseAllocation:
-        """Разпределя клиентите между превозни средства и склад"""
-        logger.info("Започвам разпределение на клиенти")
+        """Разпределя клиентите между превозни средства и склад по новата логика"""
+        logger.info("Започвам разпределение на клиенти по новата логика")
         
         # Изчисляване на общия капацитет
         total_capacity = self._calculate_total_vehicle_capacity()
         
-        # Сортиране на клиентите
+        # Сортиране на клиентите по обем (от най-малък към най-голям)
+        # и за клиенти с еднакъв обем - по разстояние (от най-далечен към най-близък)
         sorted_customers = self._sort_customers(input_data.customers)
         
-        # Разпределение - ВИНАГИ използваме warehouse логиката за 80% правило
-        if self.config.enable_warehouse:
-            return self._allocate_with_warehouse(sorted_customers, total_capacity)
-        else:
-            # Изчисляваме обема само на клиентите за автобуси
-            vehicle_volume = sum(c.volume for c in sorted_customers)
-            return WarehouseAllocation(
-                vehicle_customers=sorted_customers,
-                warehouse_customers=[],
-                total_vehicle_capacity=total_capacity,
-                total_vehicle_volume=vehicle_volume,
-                warehouse_volume=0.0,
-                capacity_utilization=vehicle_volume / total_capacity if total_capacity > 0 else 0
-            )
+        logger.info(f"Сортирани {len(sorted_customers)} клиента по обем (най-малък → най-голям) "
+                   f"и разстояние (най-далечен → най-близък)")
+        
+        # Прилагаме новата логика за разпределение
+        return self._allocate_with_warehouse(sorted_customers, total_capacity)
     
     def _calculate_total_vehicle_capacity(self) -> int:
         """Изчислява общия капацитет на всички включени превозни средства"""
@@ -91,20 +83,108 @@ class WarehouseManager:
                     total_capacity += vehicle.capacity * vehicle.count
         
         return total_capacity
+        
+    def _get_max_single_bus_capacity(self) -> int:
+        """Връща капацитета на най-големия единичен бус от наличните"""
+        max_capacity = 0
+        
+        if self.vehicle_configs:
+            for vehicle in self.vehicle_configs:
+                if vehicle.enabled and vehicle.capacity > max_capacity:
+                    max_capacity = vehicle.capacity
+        
+        return max_capacity
     
     def _sort_customers(self, customers: List[Customer]) -> List[Customer]:
-        """Сортира клиентите според конфигурацията"""
-        if self.config.sort_by_volume:
-            return sorted(customers, key=lambda c: c.volume)
-        else:
-            return customers.copy()
+        """
+        Сортира клиентите по обем (от най-малък към най-голям)
+        и след това по разстояние (от най-далечен към най-близък) до депото
+        """
+        # Взимаме депо локацията от конфигурацията
+        depot_location = self.location_config.depot_location
+        
+        # Първо сортираме по обем (от най-малък към най-голям)
+        volume_sorted = sorted(customers, key=lambda c: c.volume)
+        
+        # Групираме клиентите със същия обем
+        volume_groups = {}
+        for customer in volume_sorted:
+            volume_key = round(customer.volume, 2)  # Закръгляме за по-добро групиране
+            if volume_key not in volume_groups:
+                volume_groups[volume_key] = []
+            volume_groups[volume_key].append(customer)
+        
+        # В рамките на всяка група със същия обем, сортираме по разстояние (от най-далечен към най-близък)
+        result = []
+        for volume_key in sorted(volume_groups.keys()):
+            same_volume_customers = volume_groups[volume_key]
+            # Сортираме по разстояние от депото (от най-далечен към най-близък)
+            distance_sorted = sorted(
+                same_volume_customers,
+                key=lambda c: -calculate_distance_km(c.coordinates, depot_location) if c.coordinates else 0
+            )
+            result.extend(distance_sorted)
+        
+        return result
     
     def _allocate_with_warehouse(self, customers: List[Customer], 
                                total_capacity: int) -> WarehouseAllocation:
-        """Разпределя клиенти с използване на склад (най-големите в склада)"""
+        """
+        Нова логика за разпределение:
+        1. Сортиране по обем (от най-малък към най-голям)
+        2. За клиенти със същия обем - сортиране по разстояние (от най-далечен към най-близък)
+        3. Пълнене на бусовете до достигане на 100% капацитет или изчерпване на клиентите
+        4. Останалите клиенти се оставят в склада
+        5. ДОПЪЛНИТЕЛНО: Проверка дали клиентите надвишават капацитета на най-големия бус
+        """
+        logger.info("🔄 Прилагане на нова логика за разпределение на клиенти")
         
-        # НОВА ЛОГИКА: Най-големите клиенти отиват в склада
-        vehicle_customers, warehouse_customers = self._allocate_largest_to_warehouse(customers, total_capacity)
+        # Вече имаме сортирани клиенти (от _sort_customers)
+        # По обем - от най-малък към най-голям
+        # За клиенти с еднакъв обем - по разстояние от най-далечен към най-близък
+        
+        # Намираме капацитета на най-големия бус
+        max_single_bus_capacity = self._get_max_single_bus_capacity()
+        if max_single_bus_capacity <= 0:
+            logger.warning("⚠️ Няма налични бусове с положителен капацитет!")
+            return WarehouseAllocation(
+                vehicle_customers=[],
+                warehouse_customers=customers,
+                total_vehicle_capacity=0,
+                total_vehicle_volume=0,
+                warehouse_volume=sum(c.volume for c in customers),
+                capacity_utilization=0
+            )
+        
+        logger.info(f"ℹ️ Капацитет на най-големия бус: {max_single_bus_capacity} ст.")
+        
+        vehicle_customers = []
+        warehouse_customers = []
+        current_volume = 0.0
+        
+        # Пълнене на бусовете до достигане на 100% капацитет с проверка за размер на клиентите
+        for customer in customers:
+            # ПРОВЕРКА 1: Дали клиентът е твърде голям за който и да е бус
+            if customer.volume > max_single_bus_capacity:
+                logger.warning(f"⚠️ Клиент '{customer.name}' (обем: {customer.volume:.2f} ст.) е твърде голям "
+                              f"за най-големия бус (капацитет: {max_single_bus_capacity} ст.) и отива директно в склада")
+                warehouse_customers.append(customer)
+                continue
+                
+            # ПРОВЕРКА 2: Дали клиентът е с обем по-голям от максималния за обслужване от бусове
+            max_volume = self.config.max_bus_customer_volume
+            if customer.volume > max_volume:
+                logger.info(f"🔍 Клиент '{customer.name}' (обем: {customer.volume:.2f} ст.) е над максималния обем "
+                           f"за бусове ({max_volume:.2f} ст.) и отива директно в склада")
+                warehouse_customers.append(customer)
+                continue
+            
+            # Стандартна проверка за общ капацитет
+            if current_volume + customer.volume <= total_capacity * self.config.capacity_toleranse:
+                vehicle_customers.append(customer)
+                current_volume += customer.volume
+            else:
+                warehouse_customers.append(customer)
         
         # ИДЕНТИФИЦИРАНЕ НА КЛИЕНТИ В ЦЕНТЪР ЗОНАТА
         center_zone_customers = []
@@ -112,10 +192,9 @@ class WarehouseManager:
             center_zone_customers = self._identify_center_zone_customers(vehicle_customers)
             logger.info(f"🎯 Намерени {len(center_zone_customers)} клиента в център зоната (радиус {self.location_config.center_zone_radius_km} км)")
         
-        current_volume = sum(c.volume for c in vehicle_customers)
         warehouse_volume = sum(c.volume for c in warehouse_customers)
         
-        logger.info(f"Оптимизирано разпределение: {len(vehicle_customers)} за превозни средства, "
+        logger.info(f"Ново разпределение: {len(vehicle_customers)} за превозни средства, "
                    f"{len(warehouse_customers)} за склад")
         logger.info(f"Използване на капацитета: {current_volume}/{total_capacity} ({current_volume/total_capacity:.1%})")
         
@@ -150,7 +229,7 @@ class WarehouseManager:
             
             # Greedily добавяме клиенти
             for idx, customer, volume in indexed_customers:
-                if current_capacity + volume <= capacity_int:
+                if current_capacity + volume <= capacity_int:  # използваме толеранс за капацитета
                     selected.append(idx)
                     current_capacity += volume
             
@@ -181,8 +260,14 @@ class WarehouseManager:
     
     def _allocate_largest_to_warehouse(self, customers: List[Customer], total_capacity: int) -> Tuple[List[Customer], List[Customer]]:
         """
-        Разпределя клиенти, като първо отделя тези, които са твърде големи, за да се поберат
-        в който и да е наличен бус.
+        СТАРА ЛОГИКА - НЕ СЕ ИЗПОЛЗВА ВЕЧЕ
+        Предишната логика, която разпределя клиенти, като отделя големите за склада.
+        Заменена с нова логика за сортиране по обем и разстояние.
+        """
+        logger.info("❌ Тази логика вече не се използва.")
+        return [], []
+        
+        # Старата логика е закоментирана, тъй като вече не се използва
         """
         logger.info("✅ Активирано е предварително филтриране на заявки.")
 
@@ -242,6 +327,7 @@ class WarehouseManager:
             logger.error(f"❌ Грешка в разпределението: Input {total_input_volume:.1f} != Output {total_output_volume:.1f}")
         
         return vehicle_customers, warehouse_customers
+        """
     
     def _identify_center_zone_customers(self, customers: List[Customer]) -> List[Customer]:
         """Идентифицира клиентите, които са в център зоната"""

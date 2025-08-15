@@ -29,6 +29,7 @@ class VehicleType(Enum):
     CENTER_BUS = "center_bus"      # Специализиран бус за централна градска част
     EXTERNAL_BUS = "external_bus"  # Бус за дълги, извънградски маршрути
     SPECIAL_BUS = "special_bus"    # Нов тип бус със специален режим на работа
+    VRATZA_BUS = "vratza_bus"      # Бус от депо Враца
     WAREHOUSE = "warehouse"        # Виртуален тип за заявки, които се обработват от склад
     DISABLED = "disabled"          # Тип за изключени от употреба превозни средства
 
@@ -45,6 +46,8 @@ class VehicleConfig:
     enabled: bool = True       # Дали този тип превозно средство е активно и може да се използва от solver-а.
     start_location: Optional[Tuple[float, float]] = None  # Персонална начална точка (депо) за този тип. Ако е None, използва се главното депо.
     max_customers_per_route: Optional[int] = None # Максимален брой клиенти, които могат да бъдат обслужени в един маршрут. None = без ограничение.
+    start_time_minutes: int = 480  # Стартово време в минути от 00:00 (8:00 = 480 минути)
+    tsp_depot_location: Optional[Tuple[float, float]] = None  # Депо за TSP оптимизация. Ако е None, използва start_location или главното депо.
 
 
 @dataclass
@@ -52,15 +55,17 @@ class LocationConfig:
     """GPS координати за важни локации в системата."""
     depot_location: Tuple[float, float] = (42.695785029219415, 23.23165887245312)  # Главно депо, от което тръгват повечето превозни средства.
     center_location: Tuple[float, float] = (42.69735652560932, 23.323809998750914) # Специална локация "Център", използвана за CENTER_BUS.
-    center_zone_radius_km: float = 2  # Радиус на център зоната в километри
+    vratza_depot_location: Tuple[float, float] = (43.221042895146915, 23.5344026186417)  # Депо във Враца
+    center_zone_radius_km: float = 1.8  # Радиус на център зоната в километри
     enable_center_zone_priority: bool = True  # Дали да се прилага приоритет за център зоната
     
     # Параметри за глобата на останалите бусове за влизане в центъра
-    external_bus_center_penalty_multiplier: float = 10.0  # Множител за глоба на EXTERNAL_BUS за влизане в центъра
-    internal_bus_center_penalty_multiplier: float = 5.0   # Множител за глоба на INTERNAL_BUS за влизане в центъра
-    special_bus_center_penalty_multiplier: float = 7.0    # Множител за глоба на SPECIAL_BUS за влизане в центъра
+    external_bus_center_penalty: float = 40000  # Множител за глоба на EXTERNAL_BUS за влизане в центъра
+    internal_bus_center_penalty: float = 40000   # Множител за глоба на INTERNAL_BUS за влизане в центъра
+    special_bus_center_penalty: float = 40000    # Множител за глоба на SPECIAL_BUS за влизане в центъра
+    vratza_bus_center_penalty: float = 40000   # Множител за глоба на VRATZA_BUS за влизане в центъра (като EXTERNAL_BUS)
     enable_center_zone_restrictions: bool = True  # Дали да се прилагат ограничения за влизане в центъра
-
+    discount_center_bus: float = 0.10  # Отстъпка за CENTER_BUS в център зоната (намалява разходите с 90%)
 
 @dataclass
 class OSRMConfig:
@@ -99,13 +104,12 @@ class InputConfig:
 @dataclass
 class WarehouseConfig:
     """Конфигурации за логиката на склада, който обработва част от заявките предварително."""
-    enable_warehouse: bool = True  # Дали да се използва логиката за предварително отделяне на заявки за склада.
-    sort_by_volume: bool = True  # Дали заявките да се сортират по обем преди обработка.
-    move_largest_to_warehouse: bool = True # Ако е True, най-големите заявки се отделят за склада. Ако е False, всички отиват към solver-а.
-    warehouse_capacity_multiplier: float = 1.2 # Множител, който определя капацитета на склада спрямо общия капацитет на бусовете.
-    large_request_threshold: float = 0.3 # Праг (като процент от капацитета на най-големия бус), над който една заявка се счита за "голяма".
-
-
+    enable_warehouse: bool = True      # Дали да се използва логиката за предварително отделяне на заявки за склада
+    sort_by_volume: bool = True        # Дали заявките да се сортират по обем (от най-малък към най-голям) преди обработка
+    sort_by_distance: bool = True      # Дали да се сортират по разстояние за клиенти с еднакъв обем (от най-далечен към най-близък)
+    check_max_bus_capacity: bool = True # Проверява дали клиент надвишава капацитета на най-големия наличен бус
+    max_bus_customer_volume: float = 120 # Максимален обем на клиент (стекове), над който се изпращат към склада, а не към бусовете
+    capacity_toleranse: float = 0.90 # Толеранс на капацитета на превозните средства.
 @dataclass
 class CVRPConfig:
     """
@@ -115,10 +119,10 @@ class CVRPConfig:
     algorithm: str = "or_tools"  # Основен алгоритъм. В момента се поддържа само "or_tools".
 
     # --- Основни параметри на търсенето ---
-    time_limit_seconds: int = 60
+    time_limit_seconds: int = 360
     # Описание: Максимално време в секунди, което solver-ът има за намиране на решение.
 
-    first_solution_strategy: str = "PATH_CHEAPEST_ARC"
+    first_solution_strategy: str = "CHRISTOFIDES"
     # Описание: Стратегия за намиране на първоначално решение. SAVINGS е по-бърза от AUTOMATIC.
     # Стойности: "AUTOMATIC", "PATH_CHEAPEST_ARC", "SAVINGS", "SWEEP", и др.
 
@@ -126,39 +130,33 @@ class CVRPConfig:
     # Описание: SIMULATED_ANNEALING е по-добра за избягване на локални оптимуми.
     # Стойности: "AUTOMATIC", "GUIDED_LOCAL_SEARCH", "SIMULATED_ANNEALING", "TABU_SEARCH".
     
-    lns_time_limit_seconds: float = 2
+    lns_time_limit_seconds: float = 15
     # Описание: Много кратък микро-лимит принуждава solver-а да се движи бързо.
     # Употреба: 0.1 секунди е достатъчно за една стъпка, но не позволява зависване.
+    
+    # LNS neighborhood параметри
+    lns_num_nodes: int = 120
+    # Описание: Брой близки възли които LNS разглежда в една стъпка.
+    
+    lns_num_arcs: int = 110
+    # Описание: Брой скъпи дъги които LNS разглежда в една стъпка.
+    
+    use_full_propagation: bool = True
 
     log_search: bool = True
     # Описание: Дали OR-Tools да извежда детайлен лог на процеса на търсене.
 
-    # --- Настройки за приоритизиране на далечни клиенти ---
-    distance_normalization_factor: float = 10000
-    # Описание: Фактор за нормализиране на разстоянието при изчисляване на намаленията.
-    # По-голяма стойност = по-малки намаления за далечни клиенти.
-    
-    volume_normalization_factor: float = 360
-    # Описание: Фактор за нормализиране на обема при изчисляване на намаленията.
-    
-    distance_weight: float = 0.7
-    # Описание: Тежест на разстоянието при изчисляване на комбиниран фактор за намаления.
-    # Стойност между 0.0 и 1.0. По-голяма стойност дава по-голям приоритет на далечните клиенти.
-    
-    volume_weight: float = 0.3
-    # Описание: Тежест на обема при изчисляване на комбиниран фактор за намаления.
-    # Стойност между 0.0 и 1.0. По-голяма стойност дава по-голям приоритет на клиентите с малък обем.
-    
-    max_discount_percentage: float = 0.40
-    # Описание: Максимално допустимо намаление на разходите като процент (0.25 = 25%).
-    
-    discount_factor_divisor: float = 2.0
-    # Описание: Делител за комбиниран фактор при изчисляване на намалението.
-    # По-голяма стойност = по-малки намаления.
-    
-    distance_penalty_disjunction: int = 100000
+    search_lambda_coefficient: float = 0.8
+    # Опция за пропускане на клиенти
+
+    allow_customer_skipping: bool = True
+    # Описание: Дали solver-ът може да пропуска клиенти.
+    # False = ВСИЧКИ клиенти трябва да бъдат обслужени (НЯМА пропускане).
+    # True = Solver-ът може да пропусне клиенти ако е необходимо.
+
+    distance_penalty_disjunction: int = 45000
     # Описание: Фиксирано наказание за пропускане на клиент.
-    # По-малка стойност = по-лесно пропускане на клиенти.
+    # По-голяма стойност = по-трудно пропускане на клиенти (по-малка вероятност клиент да бъде пропуснат).
 
     # --- Настройки за паралелна обработка ---
     enable_parallel_solving: bool = True
@@ -175,29 +173,36 @@ class CVRPConfig:
     # да започват от депото, независимо от оригиналните стартови точки.
     # True = всички маршрути започват от депото, False = запазват оригиналните стартови точки.
     
-    num_workers: int = 8
+    # --- Настройки за стартово време ---
+    enable_start_time_tracking: bool = True
+    # Описание: Дали да се проследява стартово време за всеки маршрут.
+    # True = показва времето с натрупване от стартовото време, False = показва само времето на маршрута.
+    
+    global_start_time_minutes: int = 480
+    # Описание: Глобално стартово време в минути от 00:00 (8:00 = 480 минути).
+    # Използва се ако не е зададено стартово време за конкретен тип превозно средство.
+    
+    num_workers: int = -1
     # Описание: Брой паралелни процеси. -1 означава да се използват всички ядра без едно.
 
     parallel_first_solution_strategies: List[str] = field(default_factory=lambda: [
-        "PARALLEL_CHEAPEST_INSERTION",
-        "PARALLEL_CHEAPEST_INSERTION",
-        "BEST_INSERTION",
-        "PATH_CHEAPEST_ARC",
-        "SWEEP",
+        "GLOBAL_BEST_INSERTION",
+        "SAVINGS",
         "GLOBAL_CHEAPEST_ARC",
-        "BEST_INSERTION",
+        "PATH_CHEAPEST_ARC",
+        "SAVINGS",
+        "PARALLEL_CHEAPEST_INSERTION",
         "CHRISTOFIDES"
     ])
     # Описание: Списък с "First Solution" стратегии, които да се състезават в паралелен режим.
 
     parallel_local_search_metaheuristics: List[str] = field(default_factory=lambda: [
-        "TABU_SEARCH",
-        "GUIDED_LOCAL_SEARCH", 
+        "GUIDED_LOCAL_SEARCH",
+        "GUIDED_LOCAL_SEARCH",
+        "GUIDED_LOCAL_SEARCH",
         "GUIDED_LOCAL_SEARCH",
         "SIMULATED_ANNEALING",
         "GUIDED_LOCAL_SEARCH",
-        "TABU_SEARCH",
-        "SIMULATED_ANNEALING",
         "GUIDED_LOCAL_SEARCH"
     ])
     # Описание: Списък с "Local Search" метаевристики, които да се състезават в паралелен режим.
@@ -248,7 +253,7 @@ class LoggingConfig:
 @dataclass
 class CacheConfig:
     """Конфигурации за системата за кеширане."""
-    enable_cache: bool = True # Дали кеширането е активно.
+    enable_cache: bool = False # Дали кеширането е активно.
     cache_dir: str = _abs_path("cache") # Директория, в която се съхраняват кеш файловете.
     osrm_cache_file: str = "osrm_matrix_cache.json" # Файл за кеширане на OSRM матриците с разстояния.
     routes_cache_file: str = "routes_cache.json" # Файл за кеширане на готови решения.
@@ -263,7 +268,7 @@ class PerformanceConfig:
     chunk_processing_delay: float = 0.1  # Време за изчакване в секунди между обработката на отделни "chunks".
     memory_limit_mb: int = 2048 # Ограничение на паметта (информативно, не се налага стриктно).
     enable_multiprocessing: bool = True # Дали да се използва multiprocessing за ускоряване на изчисления.
-    max_workers: int = 4 # Максимален брой паралелни процеси/нишки.
+    max_workers: int = 12 # Максимален брой паралелни процеси/нишки.
 
 
 @dataclass
@@ -282,7 +287,7 @@ class MainConfig:
     performance: PerformanceConfig = field(default_factory=PerformanceConfig)
     
     # Глобални настройки на приложението
-    debug_mode: bool = False # Включва/изключва дебъг режим с по-детайлни логове.
+    debug_mode: bool = True # Включва/изключва дебъг режим с по-детайлни логове.
     verbose: bool = True # Дали да се извежда по-подробна информация в конзолата.
     dry_run: bool = False  # "Сухо" изпълнение - изпълнява се цялата логика, но без реални операции като запис на файлове.
     
@@ -296,6 +301,7 @@ class MainConfig:
         # --- Примерни GPS координати за различни депа ---
         depot_main = self.locations.depot_location
         depot_center = self.locations.center_location
+        depot_vratza = self.locations.vratza_depot_location
 
         return [
             # 1. Вътрешни бусове - 4 бр, 360 ст.
@@ -303,50 +309,72 @@ class MainConfig:
             # само на твърдите, реални лимити - ВРЕМЕ и ОБЕМ.
             VehicleConfig(
                 vehicle_type=VehicleType.INTERNAL_BUS,
-                capacity=360,
-                count=4,
-                max_distance_km=70, # Премахнато
-                max_time_hours=8,
-                service_time_minutes=7,
+                capacity=385,
+                count=7,
+                max_distance_km=None, # Премахнато
+                max_time_hours=20,
+                service_time_minutes=8,
                 enabled=True,
-                max_customers_per_route=45,
-                start_location=depot_main  # Тръгва от главното депо
+                max_customers_per_route=None,
+                start_location=depot_center,  # Тръгва от центъра
+                start_time_minutes=480,  # 8:00
+                tsp_depot_location=depot_main  # TSP оптимизация от главното депо
             ),
             # 2. Център бус - 1 бр.
             VehicleConfig(
                 vehicle_type=VehicleType.CENTER_BUS,
-                capacity=250,
+                capacity=270,
                 count=1,
-                max_distance_km=50, # Премахнато
-                max_time_hours=8,
-                service_time_minutes=9,
+                max_distance_km=None, # Премахнато
+                max_time_hours=20,
+                service_time_minutes=10,
                 enabled=True,
-                max_customers_per_route=45,
-                start_location=depot_center  # Тръгва от център депото
+                max_customers_per_route=None,
+                start_location=depot_center,  # Тръгва от център депото
+                start_time_minutes=510,  # 8:30
+                tsp_depot_location=depot_main  # TSP оптимизация от център депото
             ),
             # 3. Външни бусове - 3 бр, 360 ст.
             VehicleConfig(
                 vehicle_type=VehicleType.EXTERNAL_BUS,
-                capacity=360,
+                capacity=385,
                 count=3,
-                max_distance_km=160, # Премахнато
-                max_time_hours=8,   
-                service_time_minutes=5, # КОРИГИРАНО
-                enabled=True,
-                max_customers_per_route=40,
-                start_location=depot_main  # Тръгва от главното депо
+                max_distance_km=None, # Премахнато
+                max_time_hours=20,   
+                service_time_minutes=7, # КОРИГИРАНО
+                enabled=False,
+                max_customers_per_route=None,
+                start_location=depot_center,  # Тръгва от главното депо
+                start_time_minutes=450,  # 7:30
+                tsp_depot_location=depot_main  # TSP оптимизация от главното депо
             ),
-            # 4. Специални бусове - 2 бр, 300 ст. (изключени по подразбиране)
+            # 4. Специални бусове - 
             VehicleConfig(
                 vehicle_type=VehicleType.SPECIAL_BUS,
                 capacity=300,
                 count=2,
-                max_distance_km=100,
-                max_time_hours=8,   
+                max_distance_km=None,
+                max_time_hours=20,   
                 service_time_minutes=6,
                 enabled=False,  # Изключени по подразбиране
-                max_customers_per_route=35,
-                start_location=depot_main  # Тръгва от главното депо
+                max_customers_per_route=None,
+                start_location=depot_center,  # Тръгва от главното депо
+                start_time_minutes=480,  # 8:00
+                tsp_depot_location=depot_main  # TSP оптимизация от главното депо
+            ),
+            # 5. Враца бусове
+            VehicleConfig(
+                vehicle_type=VehicleType.VRATZA_BUS,
+                capacity=360,
+                count=1,
+                max_distance_km=None,
+                max_time_hours=20,   
+                service_time_minutes=7,
+                enabled=False,
+                max_customers_per_route=None,
+                start_location=depot_vratza,  # Тръгва от депото във Враца
+                start_time_minutes=480,  # 8:00
+                tsp_depot_location=depot_vratza  # TSP оптимизация от Враца депо
             )
         ]
 

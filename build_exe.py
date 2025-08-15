@@ -70,64 +70,132 @@ def install_dependencies():
     
     return True
 
+def get_ortools_path():
+    """Открива динамично пътя до OR-Tools библиотеката"""
+    try:
+        import ortools
+        ortools_base_path = os.path.dirname(ortools.__file__)
+        ortools_lib_path = os.path.join(ortools_base_path, '.libs')
+        
+        # Проверяваме различни възможни пътища за виртуални среди
+        if not os.path.exists(ortools_lib_path):
+            # Търсим в текущата виртуална среда
+            venv_path = os.environ.get('VIRTUAL_ENV')
+            if venv_path:
+                possible_paths = [
+                    os.path.join(venv_path, 'Lib', 'site-packages', 'ortools', '.libs'),
+                    os.path.join(venv_path, 'lib', 'python*', 'site-packages', 'ortools', '.libs')
+                ]
+                
+                for path in possible_paths:
+                    import glob
+                    matches = glob.glob(path)
+                    if matches:
+                        ortools_lib_path = matches[0]
+                        break
+        
+        return ortools_base_path, ortools_lib_path
+    except ImportError:
+        print("⚠️ OR-Tools не е инсталиран или не може да се намери!")
+        return None, None
+
 def create_spec_file():
     """Създава .spec файл за PyInstaller"""
-    spec_content = '''# -*- mode: python ; coding: utf-8 -*-
+    # Намираме OR-Tools пътища динамично
+    ortools_base_path, ortools_lib_path = get_ortools_path()
+    
+    if not ortools_base_path or not ortools_lib_path:
+        print("⚠️ Не успях да намеря OR-Tools инсталацията. Ще използвам стандартни пътища.")
+        ortools_base_path = '.venv/Lib/site-packages/ortools'
+        ortools_lib_path = '.venv/Lib/site-packages/ortools/.libs'
+    
+    # Вземаме текущата директория като основна директория на проекта
+    project_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    # Динамично създаваме бинарните пътища за OR-Tools
+    binaries = []
+    
+    # Добавяме DLL файлове
+    dll_files = ['ortools.dll', 'abseil_dll.dll', 'libprotobuf.dll', 're2.dll', 
+                 'zlib1.dll', 'libscip.dll', 'libutf8_validity.dll', 'highs.dll', 'bz2.dll']
+    for dll in dll_files:
+        dll_path = os.path.join(ortools_lib_path, dll)
+        if os.path.exists(dll_path):
+            binaries.append((dll_path, '.'))
+    
+    # Добавяме PYD файлове
+    pyd_files = [
+        ('constraint_solver/_pywrapcp.pyd', 'ortools/constraint_solver'),
+        ('linear_solver/_pywraplp.pyd', 'ortools/linear_solver')
+    ]
+    for pyd_file, dest in pyd_files:
+        pyd_path = os.path.join(ortools_base_path, pyd_file)
+        if os.path.exists(pyd_path):
+            binaries.append((pyd_path, dest))
+    
+    binaries_str = ',\n        '.join([f"(r'{src}', '{dst}')" for src, dst in binaries])
+    
+    # Подготвяме всички пътища към файловете като стрингове
+    pathex_str = repr(project_dir)
+    
+    # Подготвяме всички data файлове
+    data_files = [
+        f"(r'{os.path.join(project_dir, 'input_handler.py')}', '.')",
+        f"(r'{os.path.join(project_dir, 'warehouse_manager.py')}', '.')",
+        f"(r'{os.path.join(project_dir, 'cvrp_solver.py')}', '.')",
+        f"(r'{os.path.join(project_dir, 'output_handler.py')}', '.')",
+        f"(r'{os.path.join(project_dir, 'osrm_client.py')}', '.')",
+        f"(r'{os.path.join(project_dir, 'config.py')}', '.')",
+        f"(r'{os.path.join(project_dir, 'main.py')}', '.')",
+        f"(r'{os.path.join(project_dir, 'main_exe.py')}', '.')",
+        f"(r'{os.path.join(project_dir, 'data')}', 'data')",
+        f"(r'{os.path.join(project_dir, 'logs')}', 'logs')",
+        f"(r'{os.path.join(project_dir, 'output')}', 'output')",
+        # OR-Tools protobuf файлове
+        f"(r'{os.path.join(ortools_base_path, 'constraint_solver', 'routing_parameters_pb2.py')}', 'ortools/constraint_solver')",
+        f"(r'{os.path.join(ortools_base_path, 'constraint_solver', 'routing_enums_pb2.py')}', 'ortools/constraint_solver')",
+        f"(r'{os.path.join(ortools_base_path, 'constraint_solver', 'assignment_pb2.py')}', 'ortools/constraint_solver')",
+        f"(r'{os.path.join(ortools_base_path, 'constraint_solver', 'search_stats_pb2.py')}', 'ortools/constraint_solver')",
+        f"(r'{os.path.join(ortools_base_path, 'constraint_solver', 'search_limit_pb2.py')}', 'ortools/constraint_solver')",
+        f"(r'{os.path.join(ortools_base_path, 'constraint_solver', 'solver_parameters_pb2.py')}', 'ortools/constraint_solver')",
+        f"(r'{os.path.join(ortools_base_path, 'constraint_solver', 'routing_ils_pb2.py')}', 'ortools/constraint_solver')",
+        f"(r'{os.path.join(ortools_base_path, 'linear_solver', 'linear_solver_pb2.py')}', 'ortools/linear_solver')",
+        # OR-Tools __init__.py файлове
+        f"(r'{os.path.join(ortools_base_path, '__init__.py')}', 'ortools')",
+        f"(r'{os.path.join(ortools_base_path, 'constraint_solver', '__init__.py')}', 'ortools/constraint_solver')",
+        f"(r'{os.path.join(ortools_base_path, 'linear_solver', '__init__.py')}', 'ortools/linear_solver')",
+        # OR-Tools допълнителни файлове
+        f"(r'{os.path.join(ortools_base_path, 'constraint_solver', 'routing_parameters_pb2.pyi')}', 'ortools/constraint_solver')",
+        f"(r'{os.path.join(ortools_base_path, 'constraint_solver', 'routing_enums_pb2.pyi')}', 'ortools/constraint_solver')",
+        f"(r'{os.path.join(ortools_base_path, 'constraint_solver', 'assignment_pb2.pyi')}', 'ortools/constraint_solver')",
+        f"(r'{os.path.join(ortools_base_path, 'constraint_solver', 'search_stats_pb2.pyi')}', 'ortools/constraint_solver')",
+        f"(r'{os.path.join(ortools_base_path, 'constraint_solver', 'search_limit_pb2.pyi')}', 'ortools/constraint_solver')",
+        f"(r'{os.path.join(ortools_base_path, 'constraint_solver', 'solver_parameters_pb2.pyi')}', 'ortools/constraint_solver')",
+        f"(r'{os.path.join(ortools_base_path, 'constraint_solver', 'routing_ils_pb2.pyi')}', 'ortools/constraint_solver')",
+        f"(r'{os.path.join(ortools_base_path, 'linear_solver', 'linear_solver_pb2.pyi')}', 'ortools/linear_solver')",
+    ]
+    
+    # Събираме всички data файлове в един string
+    data_str = ",\n        ".join(data_files)
+    
+    # Подготвяме пътищата за иконата и версионния файл
+    icon_path = os.path.join(project_dir, 'data', 'icon.ico')
+    version_path = os.path.join(project_dir, 'file_version_info.txt')
+    
+    spec_content = f'''# -*- mode: python ; coding: utf-8 -*-
 
 block_cipher = None
 
 a = Analysis(
     ['main_exe.py'],
-    pathex=[],
+    pathex=[{pathex_str}],
     binaries=[
-        # OR-Tools DLL файлове - всички необходими
-        ('.venv/Lib/site-packages/ortools/.libs/ortools.dll', '.'),
-        ('.venv/Lib/site-packages/ortools/.libs/abseil_dll.dll', '.'),
-        ('.venv/Lib/site-packages/ortools/.libs/libprotobuf.dll', '.'),
-        ('.venv/Lib/site-packages/ortools/.libs/re2.dll', '.'),
-        ('.venv/Lib/site-packages/ortools/.libs/zlib1.dll', '.'),
-        ('.venv/Lib/site-packages/ortools/.libs/libscip.dll', '.'),
-        ('.venv/Lib/site-packages/ortools/.libs/libutf8_validity.dll', '.'),
-        ('.venv/Lib/site-packages/ortools/.libs/highs.dll', '.'),
-        ('.venv/Lib/site-packages/ortools/.libs/bz2.dll', '.'),
-        # OR-Tools PYD файлове
-        ('.venv/Lib/site-packages/ortools/constraint_solver/_pywrapcp.pyd', 'ortools/constraint_solver'),
-        ('.venv/Lib/site-packages/ortools/linear_solver/_pywraplp.pyd', 'ortools/linear_solver'),
+        # OR-Tools DLL и PYD файлове - динамично генерирани
+        {binaries_str},
     ],
     datas=[
-        ('input_handler.py', '.'),
-        ('warehouse_manager.py', '.'),
-        ('cvrp_solver.py', '.'),
-        ('output_handler.py', '.'),
-        ('osrm_client.py', '.'),
-        ('config.py', '.'),  # Добавено за да е сигурно, че конфигурацията с SPECIAL_BUS ще бъде включена
-        ('main.py', '.'),    # Добавено за цялост
-        ('main_exe.py', '.'), # Добавено за цялост
-        ('data', 'data'),
-        ('logs', 'logs'),    # Добавено за логове
-        ('output', 'output'), # Добавено за изходни данни
-        # OR-Tools protobuf файлове - всички необходими
-        ('.venv/Lib/site-packages/ortools/constraint_solver/routing_parameters_pb2.py', 'ortools/constraint_solver'),
-        ('.venv/Lib/site-packages/ortools/constraint_solver/routing_enums_pb2.py', 'ortools/constraint_solver'),
-        ('.venv/Lib/site-packages/ortools/constraint_solver/assignment_pb2.py', 'ortools/constraint_solver'),
-        ('.venv/Lib/site-packages/ortools/constraint_solver/search_stats_pb2.py', 'ortools/constraint_solver'),
-        ('.venv/Lib/site-packages/ortools/constraint_solver/search_limit_pb2.py', 'ortools/constraint_solver'),
-        ('.venv/Lib/site-packages/ortools/constraint_solver/solver_parameters_pb2.py', 'ortools/constraint_solver'),
-        ('.venv/Lib/site-packages/ortools/constraint_solver/routing_ils_pb2.py', 'ortools/constraint_solver'),
-        ('.venv/Lib/site-packages/ortools/linear_solver/linear_solver_pb2.py', 'ortools/linear_solver'),
-        # OR-Tools __init__.py файлове
-        ('.venv/Lib/site-packages/ortools/__init__.py', 'ortools'),
-        ('.venv/Lib/site-packages/ortools/constraint_solver/__init__.py', 'ortools/constraint_solver'),
-        ('.venv/Lib/site-packages/ortools/linear_solver/__init__.py', 'ortools/linear_solver'),
-        # OR-Tools допълнителни файлове
-        ('.venv/Lib/site-packages/ortools/constraint_solver/routing_parameters_pb2.pyi', 'ortools/constraint_solver'),
-        ('.venv/Lib/site-packages/ortools/constraint_solver/routing_enums_pb2.pyi', 'ortools/constraint_solver'),
-        ('.venv/Lib/site-packages/ortools/constraint_solver/assignment_pb2.pyi', 'ortools/constraint_solver'),
-        ('.venv/Lib/site-packages/ortools/constraint_solver/search_stats_pb2.pyi', 'ortools/constraint_solver'),
-        ('.venv/Lib/site-packages/ortools/constraint_solver/search_limit_pb2.pyi', 'ortools/constraint_solver'),
-        ('.venv/Lib/site-packages/ortools/constraint_solver/solver_parameters_pb2.pyi', 'ortools/constraint_solver'),
-        ('.venv/Lib/site-packages/ortools/constraint_solver/routing_ils_pb2.pyi', 'ortools/constraint_solver'),
-        ('.venv/Lib/site-packages/ortools/linear_solver/linear_solver_pb2.pyi', 'ortools/linear_solver'),
+        # Динамично добавени Python модули и директории
+        {data_str},
     ],
     hiddenimports=[
         'ortools',
@@ -171,7 +239,6 @@ a = Analysis(
         'enum'  # Добавено за поддръжка на VehicleType.SPECIAL_BUS
     ],
     hookspath=[],
-    hooksconfig={},
     runtime_hooks=[],
     excludes=[
         'matplotlib',
@@ -211,19 +278,24 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='data/icon.ico' if os.path.exists('data/icon.ico') else None,
-    version='file_version_info.txt' if os.path.exists('file_version_info.txt') else None
+    icon=r'{icon_path}' if os.path.exists(r'{icon_path}') else None,
+    version=r'{version_path}' if os.path.exists(r'{version_path}') else None
 )
 '''
     
-    with open('CVRP_Optimizer.spec', 'w', encoding='utf-8') as f:
+    spec_file_path = os.path.join(project_dir, 'CVRP_Optimizer.spec')
+    with open(spec_file_path, 'w', encoding='utf-8') as f:
         f.write(spec_content)
     
-    print("✅ Създаден CVRP_Optimizer.spec файл")
+    print(f"✅ Създаден CVRP_Optimizer.spec файл в {spec_file_path}")
 
 def create_version_info():
     """Създава файл с информация за версията"""
-    version_info = '''# UTF-8
+    # Вземаме текущата година за авторското право
+    import datetime
+    current_year = datetime.datetime.now().year
+    
+    version_info = f'''# UTF-8
 #
 # For more details about fixed file info 'ffi' see:
 # http://msdn.microsoft.com/en-us/library/ms646997.aspx
@@ -258,7 +330,7 @@ VSVersionInfo(
         StringStruct(u'FileDescription', u'CVRP Optimizer - Оптимизация на маршрути'),
         StringStruct(u'FileVersion', u'1.2.0'),
         StringStruct(u'InternalName', u'CVRP_Optimizer'),
-        StringStruct(u'LegalCopyright', u'© 2023 OptioRoute. Всички права запазени.'),
+        StringStruct(u'LegalCopyright', u'© {current_year} OptioRoute. Всички права запазени.'),
         StringStruct(u'OriginalFilename', u'CVRP_Optimizer.exe'),
         StringStruct(u'ProductName', u'CVRP Optimizer'),
         StringStruct(u'ProductVersion', u'1.2.0')])
@@ -268,14 +340,22 @@ VSVersionInfo(
 )
 '''
     
-    with open('file_version_info.txt', 'w', encoding='utf-8') as f:
+    # Използваме динамичен път за version файла
+    project_dir = os.path.dirname(os.path.abspath(__file__))
+    version_file_path = os.path.join(project_dir, 'file_version_info.txt')
+    
+    with open(version_file_path, 'w', encoding='utf-8') as f:
         f.write(version_info)
     
-    print("✅ Създаден file_version_info.txt файл")
+    print(f"✅ Създаден file_version_info.txt файл в {version_file_path}")
 
 def build_exe():
     """Компилира EXE файла"""
     print("\n🔨 Стартирам компилиране на EXE...")
+    
+    # Взимаме текущата директория на проекта
+    project_dir = os.path.dirname(os.path.abspath(__file__))
+    spec_file = os.path.join(project_dir, 'CVRP_Optimizer.spec')
     
     try:
         # Първо опитваме с .spec файла
@@ -283,13 +363,13 @@ def build_exe():
         subprocess.check_call([
             sys.executable, '-m', 'PyInstaller',
             '--clean',
-            'CVRP_Optimizer.spec'
+            spec_file
         ])
         
         print("✅ EXE файлът е създаден успешно!")
         
         # Проверяваме дали файлът съществува
-        exe_path = Path('dist/CVRP_Optimizer.exe')
+        exe_path = Path(os.path.join(project_dir, 'dist', 'CVRP_Optimizer.exe'))
         if exe_path.exists():
             print(f"📁 EXE файл: {exe_path.absolute()}")
             return True
@@ -303,18 +383,19 @@ def build_exe():
         
         try:
             # Ако .spec файлът не работи, опитваме с директни опции
+            main_exe_path = os.path.join(project_dir, 'main_exe.py')
             subprocess.check_call([
                 sys.executable, '-m', 'PyInstaller',
                 '--onefile',
                 '--console',
                 '--name', 'CVRP_Optimizer',
-                'main_exe.py'
+                main_exe_path
             ])
             
             print("✅ EXE файлът е създаден успешно!")
             
             # Проверяваме дали файлът съществува
-            exe_path = Path('dist/CVRP_Optimizer.exe')
+            exe_path = Path(os.path.join(project_dir, 'dist', 'CVRP_Optimizer.exe'))
             if exe_path.exists():
                 print(f"📁 EXE файл: {exe_path.absolute()}")
                 return True
@@ -328,6 +409,10 @@ def build_exe():
 
 def create_batch_file():
     """Създава .bat файл за лесно стартиране"""
+    # Използваме динамични пътища за batch файла
+    project_dir = os.path.dirname(os.path.abspath(__file__))
+    dist_dir = os.path.join(project_dir, 'dist')
+    
     batch_content = '''@echo off
 echo CVRP Optimizer - Стартиране...
 echo.
@@ -348,10 +433,21 @@ if exist "data\\input.xlsx" (
 REM Програмата сама ще пита за повторно стартиране
 '''
     
-    with open('start_cvrp.bat', 'w', encoding='utf-8') as f:
+    # Създаваме batch файл в dist директорията
+    batch_file_path = os.path.join(project_dir, 'start_cvrp.bat')
+    
+    with open(batch_file_path, 'w', encoding='utf-8') as f:
         f.write(batch_content)
     
-    print("✅ Създаден start_cvrp.bat файл")
+    # Копираме batch файла и в dist директорията
+    dist_batch_path = os.path.join(dist_dir, 'start_cvrp.bat')
+    if not os.path.exists(dist_dir):
+        os.makedirs(dist_dir)
+    
+    with open(dist_batch_path, 'w', encoding='utf-8') as f:
+        f.write(batch_content)
+    
+    print(f"✅ Създаден start_cvrp.bat файл в {batch_file_path} и {dist_batch_path}")
 
 def main():
     """Главна функция"""
@@ -380,9 +476,14 @@ def main():
         # 4. Създаваме .bat файл
         create_batch_file()
         
+        # Намираме пътя до генерирания EXE файл
+        project_dir = os.path.dirname(os.path.abspath(__file__))
+        dist_dir = os.path.join(project_dir, 'dist')
+        exe_path = os.path.join(dist_dir, 'CVRP_Optimizer.exe')
+        
         print("\n🎉 Създаването на EXE файла завърши успешно!")
         print("\n📋 Следващи стъпки:")
-        print("1. Копирайте dist/CVRP_Optimizer.exe в желаната директория")
+        print(f"1. Копирайте {exe_path} в желаната директория")
         print("2. Създайте data/input.xlsx файл с вашите данни в СЪЩАТА директория, където е EXE файлът")
         print("3. За да активирате SPECIAL_BUS, променете enabled=True в config.py")
         print("4. Стартирайте CVRP_Optimizer.exe или start_cvrp.bat")
